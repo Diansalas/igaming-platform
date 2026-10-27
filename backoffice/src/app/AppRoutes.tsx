@@ -30,11 +30,29 @@ import { KillSwitchPage } from '../features/killswitch/KillSwitchPage'
 import { LaunchQueuePage } from '../features/launch/LaunchQueuePage'
 import { AmlPage } from '../features/aml/AmlPage'
 import { CaseDetailPage } from '../features/aml/CaseDetailPage'
+import { ScreeningPage } from '../features/aml/ScreeningPage'
 import { ParkedPaymentsPage } from '../features/payments/ParkedPaymentsPage'
 import { ReconciliationPage } from '../features/reconciliation/ReconciliationPage'
 import { CapabilityGrantsPage } from '../features/capability/CapabilityGrantsPage'
 import { ForceResolutionsPage } from '../features/resolutions/ForceResolutionsPage'
 import { HoldResolutionsPage } from '../features/resolutions/HoldResolutionsPage'
+import { LicensingLayout } from '../features/licensing/LicensingLayout'
+import { JurisdictionDetailPage, JurisdictionsPage } from '../features/licensing/JurisdictionsPage'
+import { LicencesPage } from '../features/licensing/LicencesPage'
+import { LicenceDetailPage } from '../features/licensing/LicenceDetailPage'
+import { ChangesPage } from '../features/licensing/ChangesPage'
+import { ChangeDetailPage } from '../features/licensing/ChangeDetailPage'
+import { OperatingBasesPage, TenantOperatingBasesPage } from '../features/licensing/OperatingBasesPage'
+import { OperatingBasisDetailPage } from '../features/licensing/OperatingBasisDetailPage'
+import { TenantLicensingPage } from '../features/licensing/TenantLicensingPage'
+import { KycPoliciesPage } from '../features/policies/KycPoliciesPage'
+import { ResidencePage } from '../features/policies/ResidencePage'
+import {
+  WithdrawalRestrictionChangeDetailPage,
+  WithdrawalRestrictionChangesPage,
+  WithdrawalRestrictionTenantPage,
+  WithdrawalRestrictionsHome,
+} from '../features/policies/WithdrawalRestrictionPages'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
 
@@ -81,6 +99,74 @@ export function AppRoutes() {
           }
         />
         <Route
+          path="licensing"
+          element={
+            <RequireNavPermission permission="licensingRead">
+              <LicensingLayout />
+            </RequireNavPermission>
+          }
+        >
+          <Route index element={<Navigate to="jurisdictions" replace />} />
+          <Route path="jurisdictions" element={<JurisdictionsPage />} />
+          <Route path="jurisdictions/:jurisdictionId" element={<JurisdictionDetailPage />} />
+          <Route path="licences" element={<LicencesPage />} />
+          <Route path="licences/:licenceId" element={<LicenceDetailPage />} />
+          <Route path="operating-bases" element={<OperatingBasesPage />} />
+          <Route path="operating-bases/tenants/:tenantId" element={<TenantOperatingBasesPage />} />
+          <Route path="operating-bases/:basisId" element={<OperatingBasisDetailPage />} />
+          <Route path="changes" element={<ChangesPage />} />
+          <Route path="changes/:changeId" element={<ChangeDetailPage />} />
+          <Route path="tenants/:tenantId" element={<TenantLicensingPage />} />
+        </Route>
+        <Route
+          path="kyc-policies"
+          element={
+            <RequireNavPermission permission="kycPolicyRead">
+              <KycPoliciesPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="residence-approval"
+          element={
+            <RequireNavPermission permission="residencePolicyRead">
+              <ResidencePage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="withdrawal-restrictions"
+          element={
+            <RequireNavPermission permission="wrpRead">
+              <WithdrawalRestrictionsHome />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="withdrawal-restrictions/tenants/:tenantId"
+          element={
+            <RequireNavPermission permission="wrpRead">
+              <WithdrawalRestrictionTenantPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="withdrawal-restrictions/changes"
+          element={
+            <RequireNavPermission permission="wrpChange">
+              <WithdrawalRestrictionChangesPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="withdrawal-restrictions/changes/:changeId"
+          element={
+            <RequireNavPermission permission="wrpChange">
+              <WithdrawalRestrictionChangeDetailPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
           path="launch-queue"
           element={
             <RequireNavPermission permission="launchQueue">
@@ -109,6 +195,14 @@ export function AppRoutes() {
           element={
             <RequireNavPermission permission="amlRead">
               <AmlPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="aml/screening"
+          element={
+            <RequireNavPermission permission="amlRead">
+              <ScreeningPage />
             </RequireNavPermission>
           }
         />

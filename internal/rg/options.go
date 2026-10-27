@@ -18,6 +18,7 @@ package rg
 
 import (
 	"context"
+	"errors"
 	"sort"
 
 	"github.com/google/uuid"
@@ -41,7 +42,26 @@ type LimitOption struct {
 	Ceiling                 *string
 	Scope                   LimitScope
 	IncreaseCooldownSeconds *int64
+	// UnavailableReason (lic27a) is non-empty when the limit options of this kind cannot be offered because the rulebook of a jurisdiction the
+	// tenant relies on is incomplete (missing_floor) or ambiguous (calendar_conflict). ConfigInForce is then false and nothing is offered:
+	// no periods, no ceiling. For missing_floor the write path refuses increases, removals and confirms (RefusedConfigMissing). For
+	// calendar_conflict the write path does NOT refuse them (it composes the rulebook without reading calendar_tz / week_start): the
+	// options offer none, and only the play-path evaluation and the account usage read fail closed. Whether the write path should also
+	// refuse loosening under calendar_conflict is an OWNER decision (docs/plans/lic29-record.md, proposed ADR text). The protective
+	// options of Options (time-out, self-exclusion) are always returned.
+	UnavailableReason string
+	// ProtectiveOnly (lic28) accompanies UnavailableReason: AllowedPeriods then lists only the periods of the relied-on jurisdictions that DO
+	// have a floor (their union), for a FIRST limit or a LOWER value, both of which the server always accepts (initial and decrease are never
+	// refused for an incomplete rulebook). Nothing else is offered: no ceiling, no cooldown; for missing_floor increases, removals and confirms are
+	// refused by the server, for calendar_conflict they are merely not offered (see UnavailableReason).
+	ProtectiveOnly bool
 }
+
+// Reasons a limit kind is unavailable in Options.
+const (
+	OptionUnavailableMissingFloor     = "missing_floor"
+	OptionUnavailableCalendarConflict = "calendar_conflict"
+)
 
 // Options is everything the player's RG screen needs from the server for one asset.
 type Options struct {
@@ -69,15 +89,35 @@ func ReadOptions(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID, 
 	if err != nil {
 		return Options{}, err
 	}
-	jur, err := tenantJurisdiction(ctx, tx, tenantID)
+	sel, err := tenantReliance(ctx, tx, tenantID)
 	if err != nil {
 		return Options{}, err
 	}
 	out := Options{AssetCode: asset, EnforcementEnabled: on, SelfExclusionDays: append([]int(nil), DefaultSelfExclusionDays...)}
 	for _, k := range []ControlKind{ControlDeposit, ControlLoss, ControlWager} {
-		cfg, err := readUsageConfigFor(ctx, tx, jur, tenantID, acct.BrandID, k, &asset, nil)
+		cfg, err := readUsageConfigFor(ctx, tx, sel, tenantID, acct.BrandID, k, &asset, nil)
+		if errors.Is(err, errCalendarConflict) {
+			// composeConfig does not read calendar_tz / week_start, so the periods of the members are still known.
+			cc, cerr := composeConfig(ctx, tx, sel, tenantID, acct.BrandID, k, &asset)
+			if cerr != nil {
+				return Options{}, cerr
+			}
+			out.Limits = append(out.Limits, protectiveOption(k, OptionUnavailableCalendarConflict, cc.AllowedPeriods))
+			continue
+		}
 		if err != nil {
 			return Options{}, err
+		}
+		if cfg.MissingFloors {
+			// lic25/lic27a: a tenant with an approved basis must not be shown a partial truth (the options of the jurisdictions that do have a
+			// floor) while another jurisdiction it relies on has none: the kind is marked unavailable, never "no configuration". Time-out and
+			// self-exclusion are protective and are returned regardless; the write path still refuses increases, removals and confirms.
+			periods := make([]string, 0, len(cfg.AllowedPeriods))
+			for _, p := range cfg.AllowedPeriods {
+				periods = append(periods, string(p))
+			}
+			out.Limits = append(out.Limits, protectiveOption(k, OptionUnavailableMissingFloor, periods))
+			continue
 		}
 		o := LimitOption{Kind: k, ConfigInForce: cfg.Found, Mandatory: cfg.Mandatory, Ceiling: cfg.Ceiling, Scope: cfg.Scope,
 			IncreaseCooldownSeconds: cfg.CooldownSeconds, AllowedPeriods: cfg.AllowedPeriods}
@@ -86,7 +126,7 @@ func ReadOptions(ctx context.Context, tx pgx.Tx, tenantID, accountID uuid.UUID, 
 		}
 		out.Limits = append(out.Limits, o)
 	}
-	to, err := composeConfig(ctx, tx, jur, tenantID, acct.BrandID, ControlTimeOut, nil)
+	to, err := composeConfig(ctx, tx, sel, tenantID, acct.BrandID, ControlTimeOut, nil)
 	if err != nil {
 		return Options{}, err
 	}
@@ -110,4 +150,13 @@ func timeOutHours(c ComposedConfig) []int {
 		return []int{}
 	}
 	return hours
+}
+
+// protectiveOption is the limit option of an unavailable kind: only the periods that exist in the jurisdictions that do have a floor.
+func protectiveOption(k ControlKind, reason string, periods []string) LimitOption {
+	o := LimitOption{Kind: k, AllowedPeriods: []PeriodKind{}, UnavailableReason: reason, ProtectiveOnly: true}
+	for _, p := range periods {
+		o.AllowedPeriods = append(o.AllowedPeriods, PeriodKind(p))
+	}
+	return o
 }

@@ -64,12 +64,15 @@ func AnyCountryPermits(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brand
 	// SR8R-1: bound the resolver work. (1) One set-based query drops every
 	// candidate that has no in-force, active, ENABLED licence ceiling - the
 	// resolver denies those unconditionally (its step 1), so skipping them cannot
-	// change an answer. (A failed statement aborts the transaction, so the next
-	// resolver query errors and the call returns an error - treated as CLOSED by
-	// every caller; ErrNoRows does not abort and keeps the full list.) (2) The country that last permitted this (tenant, brand,
+	// change an answer. (lic17 L-4: any error of the prefilter, including a tenant row
+	// that is not visible, is returned - "could not decide", treated as CLOSED by every
+	// caller - instead of silently continuing with the unfiltered list.) (2) The country that last permitted this (tenant, brand,
 	// operations) is tried FIRST: a hint only, the resolver still decides, so a
 	// stale hint costs one extra resolve and never changes a verdict.
-	countries = prefilterByCeiling(ctx, tx, tenantID, asOf, countries)
+	countries, err = prefilterByCeiling(ctx, tx, tenantID, asOf, countries)
+	if err != nil {
+		return true, false, fmt.Errorf("marketgate: ceiling prefilter: %w", err)
+	}
 	hintKey := openHintKey(tenantID, brandID, ops)
 	if hint, ok := openHints.get(hintKey); ok {
 		for i, cc := range countries {
@@ -189,15 +192,20 @@ func openHintKey(tenantID uuid.UUID, brandID *uuid.UUID, ops []Operation) string
 }
 
 // prefilterByCeiling keeps only the candidates that have an in-force, active,
-// enabled ceiling for the tenant's licence. On any error it returns the input
-// unchanged; note that a failed statement aborts the surrounding transaction, so
-// the resolver's next query then errors and the caller treats the brand as CLOSED.
-func prefilterByCeiling(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, asOf time.Time, in []string) []string {
+// enabled ceiling for the tenant's licence, plus every country with an approved,
+// active, in-force operating basis. A tenant with NO licence keeps the input (the
+// resolver decides each country; a superset is harmless). lic17 L-4: any read error
+// (including a tenant row that is not visible) is RETURNED, never answered with the
+// unfiltered list (fail closed and explicit: the caller treats an error as CLOSED).
+func prefilterByCeiling(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, asOf time.Time, in []string) ([]string, error) {
 	// Two plain reads (the licence binding, then its ceilings) so no single statement
 	// both joins tenants and names a status column (tenant/status_readers_static_test).
 	var licenceID *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&licenceID); err != nil || licenceID == nil {
-		return in
+	if err := tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&licenceID); err != nil {
+		return nil, fmt.Errorf("read the tenant licence: %w", err)
+	}
+	if licenceID == nil {
+		return in, nil
 	}
 	rows, err := tx.Query(ctx, `
 		SELECT DISTINCT country_code
@@ -205,19 +213,42 @@ func prefilterByCeiling(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, asOf
 		 WHERE licence_id = $1 AND state = 'enabled' AND status = 'active'
 		   AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2)`, *licenceID, asOf)
 	if err != nil {
-		return in
+		return nil, fmt.Errorf("read the licence ceilings: %w", err)
 	}
 	defer rows.Close()
 	ok := map[string]bool{}
 	for rows.Next() {
 		var cc string
-		if rows.Scan(&cc) != nil {
-			return in
+		if err := rows.Scan(&cc); err != nil {
+			return nil, fmt.Errorf("scan a licence ceiling: %w", err)
 		}
 		ok[cc] = true
 	}
-	if rows.Err() != nil {
-		return in
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the licence ceilings: %w", err)
+	}
+	rows.Close()
+	// lic9: a country governed by an explicit operating basis (a licence of the basis, or a documented no-licence determination) is
+	// decided by the resolver, not by the tenant's own licence ceiling: keep every country that has an active, approved, in-force
+	// basis row for the tenant (a superset is harmless - the resolver still decides; only dropping a permitted country would be a bug).
+	brows, err := tx.Query(ctx, `
+		SELECT DISTINCT country_code
+		  FROM operating_bases
+		 WHERE tenant_id = $1 AND status = 'active' AND change_request_id IS NOT NULL
+		   AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2)`, tenantID, asOf)
+	if err != nil {
+		return nil, fmt.Errorf("read the operating bases: %w", err)
+	}
+	defer brows.Close()
+	for brows.Next() {
+		var cc string
+		if err := brows.Scan(&cc); err != nil {
+			return nil, fmt.Errorf("scan an operating basis: %w", err)
+		}
+		ok[cc] = true
+	}
+	if err := brows.Err(); err != nil {
+		return nil, fmt.Errorf("read the operating bases: %w", err)
 	}
 	out := make([]string, 0, len(in))
 	for _, cc := range in {
@@ -225,5 +256,5 @@ func prefilterByCeiling(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, asOf
 			out = append(out, cc)
 		}
 	}
-	return out
+	return out, nil
 }

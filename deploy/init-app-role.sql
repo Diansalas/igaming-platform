@@ -230,14 +230,44 @@ BEGIN
         'aml_case_approve(uuid, uuid, integer, text, text)', 'aml_case_read(uuid, uuid)', 'aml_case_events_list(uuid, uuid)',
         'aml_case_notes_list(uuid, uuid)', 'aml_case_queue(uuid, integer)',
         -- Migration 0154 (A7): screening policy / record / list and the launch readiness reader.
-        'aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)', 'aml_screening_policy_effective(uuid, uuid)',
+        -- (aml_screening_policy_set is NOT here since migration 0191 (d1, D7): the unrouted break-glass setter is owner-only.)
+        'aml_screening_policy_effective(uuid, uuid)',
         'aml_screening_record(uuid, uuid, text, text, text, text, text, text[], text, text[], text, timestamptz, text, text)',
-        'aml_screening_list(uuid, uuid)', 'aml_readiness(uuid, uuid[])'
+        'aml_screening_list(uuid, uuid)', 'aml_readiness(uuid, uuid[])',
+        -- Migration 0181 (lic10, G1): the automatic screening trigger policy, queue and worker API.
+        -- (aml_screening_trigger_policy_set is NOT here since migration 0191 (d1, D4): the loosening-capable setter is owner-only.)
+        'aml_screening_trigger_policy_effective(uuid, uuid)',
+        'aml_screening_gate_overdue(uuid, integer)', 'screening_worker_heartbeat(text, boolean)',
+        'aml_screening_request_list(uuid, uuid)', 'aml_screening_enqueue_due(uuid, integer)', 'aml_screening_request_claim(uuid, integer, integer)',
+        -- (migration 0192, d1 D10: the finish function takes the screening policy version as its last argument; the 12-argument form is gone.)
+        'aml_screening_request_finish(uuid, uuid, uuid, text, text[], text, text, text, text, timestamptz, integer, text, uuid)',
+        'aml_screening_request_replace(uuid, uuid, uuid, text)', 'aml_screening_parked_summary(uuid, timestamptz)', 'aml_screening_parked_overdue(uuid, timestamptz, uuid, integer)',
+        -- Migration 0189 (lic29): the HTTP route's tighten-only screening policy author.
+        'aml_screening_policy_author(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)',
+        -- Migration 0190 (c4): the governed screening-policy loosening executors and helpers (platform principal sessions only; the
+        -- executors also need an executed licensing change request of this transaction).
+        'screening_loosening_state(uuid)', 'screening_policy_loosen_assert(jsonb, timestamptz)',
+        'screening_loosening_settings_apply(uuid)', 'screening_policy_loosen_apply(uuid)',
+        'screening_loosening_officer_ok(uuid, uuid, uuid)', 'screening_loosening_officers_assert(uuid, uuid, uuid)',
+        'screening_loosening_approvers_assert(uuid, uuid, uuid, uuid)', 'screening_loosening_reconcile()',
+        -- Migration 0191 (d1, D4): the tighten-only trigger policy author (the route) and the governed trigger-policy loosening validator / executor.
+        'aml_screening_trigger_policy_author(uuid, uuid, text[], boolean, bigint, timestamptz, text, text)',
+        'screening_trigger_loosen_assert(jsonb, timestamptz)', 'screening_trigger_loosen_apply(uuid)'
     ] LOOP
         IF to_regprocedure('public.' || f) IS NOT NULL THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
         END IF;
     END LOOP;
+    -- Migration 0191 (d1, D7 and D4): the loosening-capable break-glass setters (screening policy and trigger policy) are OWNER-ONLY. Re-asserted on every run, because an older
+    -- deployment script (or a database restored from before 0191) granted it to the runtime role.
+    IF to_regprocedure('public.aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION aml_screening_policy_set(uuid, uuid, text[], bigint, bigint, timestamptz, text, text) FROM igaming_runtime;
+    END IF;
+    IF to_regprocedure('public.aml_screening_trigger_policy_set(uuid, uuid, text[], boolean, bigint, timestamptz, text, text)') IS NOT NULL THEN
+        REVOKE ALL ON FUNCTION aml_screening_trigger_policy_set(uuid, uuid, text[], boolean, bigint, timestamptz, text, text) FROM PUBLIC;
+        REVOKE ALL ON FUNCTION aml_screening_trigger_policy_set(uuid, uuid, text[], boolean, bigint, timestamptz, text, text) FROM igaming_runtime;
+    END IF;
     -- NOT granted until the HD-RET-1 erasure job exists as its caller (security F5): re-assert the revoke.
     IF to_regprocedure('public.aml_person_has_records(uuid, uuid)') IS NOT NULL THEN
         REVOKE ALL ON FUNCTION aml_person_has_records(uuid, uuid) FROM igaming_runtime;
@@ -638,6 +668,67 @@ BEGIN
 END
 $$;
 
+-- Migration 0177 (MKT-DUAL-1, licensing / jurisdiction maker-checker): least-privilege, re-asserted on every run,
+-- mirroring migration 0177's own in-migration grant block. RLS (FORCE on all three), the guard triggers (proof-bound state
+-- machine, append-only) are the binding controls; these grants are defence in depth, narrower than the blanket backfill
+-- GRANT above (which would otherwise re-grant UPDATE / DELETE):
+--   licensing_change_kinds     - the closed kind registry: SELECT only (written by migrations only).
+--   licensing_change_requests  - SELECT/INSERT, and UPDATE on the eight state columns only (request content is immutable;
+--                                the guard re-derives every state column). Never DELETE or TRUNCATE.
+--   licensing_change_approvals - append-only: SELECT/INSERT only.
+-- No role, password or attribute change.
+DO $$
+BEGIN
+    IF to_regclass('public.licensing_change_kinds') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON licensing_change_kinds FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON licensing_change_kinds TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.licensing_change_requests') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON licensing_change_requests FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON licensing_change_requests TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (status, decided_by, decided_by_person_id, decided_at, decision_reason_code, executed_by, executed_at, executed_txid) ON licensing_change_requests TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.licensing_change_approvals') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON licensing_change_approvals FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON licensing_change_approvals TO igaming_runtime';
+    END IF;
+END
+$$;
+
+-- Migration 0178 (lic4 slice 4a, security review F-2): licence_versions is written ONLY by the licences trigger (a SECURITY
+-- DEFINER function); the runtime role keeps SELECT, never INSERT (the blanket backfill GRANT above would re-grant it).
+DO $$
+BEGIN
+    IF to_regclass('public.licence_versions') IS NOT NULL THEN
+        EXECUTE 'REVOKE INSERT ON licence_versions FROM igaming_runtime';
+    END IF;
+END
+$$;
+
+-- Migration 0179 (lic6, security re-review I-2): no code path deletes a licence, and the runtime role must not be able to (the
+-- blanket backfill GRANT above would re-grant DELETE). Re-asserted on every run.
+DO $$
+BEGIN
+    IF to_regclass('public.licences') IS NOT NULL THEN
+        EXECUTE 'REVOKE DELETE ON licences FROM igaming_runtime';
+    END IF;
+END
+$$;
+
+-- Migration 0180 (lic9, explicit operating bases): operating_bases is governed and append-only. The runtime role keeps SELECT and
+-- INSERT and UPDATE on the single column effective_to (the close of a replaced version), all admitted only by the governed-write
+-- guard (an executed licensing change request of this transaction, LC040); never DELETE, TRUNCATE or a blanket UPDATE (the blanket
+-- backfill GRANT above would otherwise re-grant them). Re-asserted on every run.
+DO $$
+BEGIN
+    IF to_regclass('public.operating_bases') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON operating_bases FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON operating_bases TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (effective_to) ON operating_bases TO igaming_runtime';
+    END IF;
+END
+$$;
+
 -- ADR 0115 S1 (migration 0135, RG limits schema): least-privilege, re-asserted on every run,
 -- mirroring migration 0135's own in-migration grant block. RLS (FORCE on the three RG tables) and
 -- the guard / deny triggers are the binding controls; these grants are defence in depth, narrower
@@ -767,6 +858,70 @@ BEGIN
     IF to_regclass('public.withdrawal_gate_decisions') IS NOT NULL THEN
         EXECUTE 'REVOKE ALL ON withdrawal_gate_decisions FROM igaming_runtime';
         EXECUTE 'GRANT SELECT, INSERT ON withdrawal_gate_decisions TO igaming_runtime';
+    END IF;
+END
+$$;
+
+-- Migration 0181 (lic10, G8/Q21): the residence determination maker-checker. The three tables are owner-written (SECURITY DEFINER
+-- functions); the runtime role keeps SELECT on residence_determination_checks ONLY (tenant RLS: the evidence read and the pending
+-- list) and EXECUTE on the four definer API functions. Re-asserted on every run because the blanket GRANT above would otherwise
+-- re-grant the tables. Guarded: nothing exists before the migrations ran.
+DO $$
+DECLARE
+    t text;
+    f text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['residence_approval_policies', 'residence_approval_policy_approvals', 'residence_determination_checks'] LOOP
+        IF to_regclass('public.' || t) IS NOT NULL THEN
+            EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t);
+        END IF;
+    END LOOP;
+    IF to_regclass('public.residence_determination_checks') IS NOT NULL THEN
+        GRANT SELECT ON residence_determination_checks TO igaming_runtime;
+    END IF;
+    FOREACH f IN ARRAY ARRAY['residence_policy_set(uuid, text, text)', 'residence_policy_approve(uuid, uuid, text)', 'residence_policy_list(uuid)',
+                             'residence_determination_approve(uuid, uuid, timestamptz, text)'] LOOP
+        IF to_regprocedure('public.' || f) IS NOT NULL THEN
+            EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO igaming_runtime', f);
+        END IF;
+    END LOOP;
+END $$;
+
+-- Migration 0181 (lic18): the worker heartbeat table is written only by its SECURITY DEFINER function; the runtime role has no
+-- table privilege (re-asserted: the blanket GRANT above would otherwise hand it out).
+DO $$
+BEGIN
+    IF to_regclass('public.screening_worker_heartbeats') IS NOT NULL THEN
+        REVOKE ALL ON screening_worker_heartbeats FROM igaming_runtime;
+    END IF;
+END $$;
+
+-- Migration 0182 (lic11, withdrawal restriction policy): least-privilege, re-asserted on every run, mirroring 0182's own grant
+-- block. FORCE RLS and the guard triggers (append-only, proof-bound maker-checker, WR040 governed write) are the binding
+-- controls; this narrowing is defence in depth against the blanket backfill GRANT above (UPDATE / DELETE):
+--   withdrawal_restriction_causes           - migration-written registry: SELECT only.
+--   withdrawal_restriction_policies         - append-only: SELECT/INSERT only.
+--   withdrawal_restriction_policy_changes   - SELECT/INSERT, UPDATE on the eight state columns only.
+--   withdrawal_restriction_policy_approvals - append-only: SELECT/INSERT only.
+-- No role, password or attribute change.
+DO $$
+BEGIN
+    IF to_regclass('public.withdrawal_restriction_causes') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON withdrawal_restriction_causes FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON withdrawal_restriction_causes TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.withdrawal_restriction_policies') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON withdrawal_restriction_policies FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON withdrawal_restriction_policies TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.withdrawal_restriction_policy_changes') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON withdrawal_restriction_policy_changes FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON withdrawal_restriction_policy_changes TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (status, decided_by, decided_by_person_id, decided_at, decision_reason_code, executed_by, executed_at, executed_txid) ON withdrawal_restriction_policy_changes TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.withdrawal_restriction_policy_approvals') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON withdrawal_restriction_policy_approvals FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON withdrawal_restriction_policy_approvals TO igaming_runtime';
     END IF;
 END
 $$;

@@ -45,14 +45,24 @@ func mustCreateActiveLicenceOverHTTP(t *testing.T, srv *httptest.Server, token, 
 	t.Helper()
 	jurisdictionID := mustCreateJurisdictionOverHTTP(t, srv, token)
 
+	// Migration 0177: the route files a licence_create change (202); two other Persons approve it.
+	ensureLicensingProofs(t)
 	resp := sendAssetJSON(t, srv.URL+"/v1/admin/licences", http.MethodPost, token, map[string]any{
 		"jurisdiction_id": jurisdictionID, "licensee": licensee, "licence_number": "HTTP-TL-" + uuid.NewString()[:8], "reason_code": "test-setup"})
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("expected 201 creating licence fixture, got %d", resp.StatusCode)
+	done := executeFiledChange(t, srv, licensingTestPool(t), resp)
+	id, _ := done.Outcome["licence_id"].(string)
+	if id == "" {
+		t.Fatalf("the executed licence_create must report the licence id: %+v", done)
 	}
-	var l licenceResponse
-	decodeBody(t, resp, &l)
-	return l.ID
+	return id
+}
+
+// licensingTestPool is an owner pool for creating approver staff (the server's own pool is not reachable from a helper that
+// only holds the server).
+func licensingTestPool(t *testing.T) *db.Pool {
+	t.Helper()
+	pool, _ := testEnv(t)
+	return pool
 }
 
 // insertSuspendedLicenceOverHTTP bypasses the licence-creation endpoint
@@ -100,20 +110,36 @@ func TestAssignTenantLicenceAPI_HappyPath(t *testing.T) {
 
 	licenceID := mustCreateActiveLicenceOverHTTP(t, srv, token, "platform")
 
+	// INTENTIONAL BEHAVIOUR CHANGE (migration 0177, G-2): a bind files a tenant_licence_bind change (202) and nothing is bound
+	// until two other Persons approve it.
 	resp := sendAssetJSON(t, srv.URL+"/v1/admin/tenants/"+tenant.ID.String()+"/licence", http.MethodPut, token, map[string]any{
 		"licence_id": licenceID, "reason_code": "onboarding",
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	if got := tenantLicenceOf(t, pool, tenant.ID); got != nil {
+		t.Fatalf("a filed bind must not bind anything yet, got %v", *got)
 	}
-	var body assignTenantLicenceResponse
-	decodeBody(t, resp, &body)
-	if body.TenantID != tenant.ID.String() {
-		t.Errorf("expected tenant_id %s, got %s", tenant.ID, body.TenantID)
+	done := executeFiledChange(t, srv, pool, resp)
+	if done.Outcome["tenant_id"] != tenant.ID.String() {
+		t.Errorf("expected tenant_id %s, got %v", tenant.ID, done.Outcome["tenant_id"])
 	}
-	if body.LicenceID == nil || *body.LicenceID != licenceID {
-		t.Errorf("expected licence_id %s, got %v", licenceID, body.LicenceID)
+	if done.Outcome["licence_id"] != licenceID {
+		t.Errorf("expected licence_id %s, got %v", licenceID, done.Outcome["licence_id"])
 	}
+	if got := tenantLicenceOf(t, pool, tenant.ID); got == nil || got.String() != licenceID {
+		t.Fatalf("after execution the tenant must be bound to %s, got %v", licenceID, got)
+	}
+}
+
+// tenantLicenceOf reads tenants.licence_id (platform scope).
+func tenantLicenceOf(t *testing.T, pool *db.Pool, tenantID uuid.UUID) *uuid.UUID {
+	t.Helper()
+	var id *uuid.UUID
+	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&id)
+	}); err != nil {
+		t.Fatalf("read tenant licence: %v", err)
+	}
+	return id
 }
 
 // TestAssignTenantLicenceAPI_MissingLicenceIDKey proves the key's absence
@@ -146,11 +172,9 @@ func TestAssignTenantLicenceAPI_NullUnassigns(t *testing.T) {
 	resp := sendAssetJSON(t, srv.URL+"/v1/admin/tenants/"+tenant.ID.String()+"/licence", http.MethodPut, token, map[string]any{
 		"licence_id": licenceID, "reason_code": "onboarding",
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 assigning, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
+	executeFiledChange(t, srv, pool, resp) // migration 0177: the bind is a two-person change
 
+	// The unbind (narrowing) stays single-actor: executed in the same call, 200, previous response shape.
 	resp = sendAssetJSON(t, srv.URL+"/v1/admin/tenants/"+tenant.ID.String()+"/licence", http.MethodPut, token, map[string]any{
 		"licence_id": nil, "reason_code": "offboarding",
 	})
@@ -279,10 +303,11 @@ func TestAssignTenantLicenceAPI_PlatformAdminCanTargetAnyTenant(t *testing.T) {
 		resp := sendAssetJSON(t, srv.URL+"/v1/admin/tenants/"+tgt.ID.String()+"/licence", http.MethodPut, token, map[string]any{
 			"licence_id": licenceID, "reason_code": "onboarding",
 		})
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("expected 200 assigning to tenant %s, got %d", tgt.ID, resp.StatusCode)
+		// Migration 0177: filed (202), then executed by two other Persons.
+		executeFiledChange(t, srv, pool, resp)
+		if got := tenantLicenceOf(t, pool, tgt.ID); got == nil || got.String() != licenceID {
+			t.Fatalf("tenant %s must be bound after execution, got %v", tgt.ID, got)
 		}
-		resp.Body.Close()
 	}
 }
 
@@ -406,10 +431,7 @@ func TestAssignTenantLicenceAPI_ExclusiveLicenceAlreadyBoundRejected(t *testing.
 	resp := sendAssetJSON(t, srv.URL+"/v1/admin/tenants/"+tenantX.ID.String()+"/licence", http.MethodPut, token, map[string]any{
 		"licence_id": byolLicence, "reason_code": "byol-first-bind",
 	})
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 for the first tenant's BYOL bind, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
+	executeFiledChange(t, srv, pool, resp) // migration 0177: the first bind is a two-person change
 
 	resp = sendAssetJSON(t, srv.URL+"/v1/admin/tenants/"+tenantY.ID.String()+"/licence", http.MethodPut, token, map[string]any{
 		"licence_id": byolLicence, "reason_code": "byol-second-bind-attempt",

@@ -7,6 +7,7 @@ package httpserver
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -380,5 +381,36 @@ func TestCreateRiskRule_ThresholdDenominationIsRequiredExactlyOnce(t *testing.T)
 				t.Fatalf("an asset-scoped rule must not also carry a threshold_exponent, got %+v", created)
 			}
 		})
+	}
+}
+
+// G6/G7 (licensing enforcement slice 3): a deposit rule (never evaluated) and a
+// jurisdiction-scoped rule (would refuse every evaluation) are refused at
+// authoring with a 400 carrying a stable code, and nothing is stored.
+func TestRiskRules_DepositAndJurisdictionScopedRulesAreRefusedAtAuthoring(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	riskManager := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleRiskManager, "rm-pw-2")
+	token := mustLoginStaff(t, srv, tenant.Slug, riskManager.Email, "rm-pw-2")
+
+	for _, c := range []struct {
+		name, code string
+		body       map[string]any
+	}{
+		{"deposit", "operation_not_evaluated", map[string]any{"operation": "deposit", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 5, "threshold_exponent": 2}},
+		{"jurisdiction on withdrawal", "jurisdiction_scope_unsupported", map[string]any{"operation": "withdrawal", "jurisdiction_code": "KM-ANJ", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 5, "threshold_exponent": 2}},
+		{"jurisdiction on casino_bet", "jurisdiction_scope_unsupported", map[string]any{"operation": "casino_bet", "jurisdiction_code": "KM-ANJ", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 5, "threshold_exponent": 2}},
+	} {
+		resp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, c.body)
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(apiErr.Message, c.code) {
+			t.Fatalf("%s: want 400 mentioning %s, got %d %+v", c.name, c.code, resp.StatusCode, apiErr)
+		}
+	}
+	if n := countTenantRows(t, pool, tenant.ID, `SELECT count(*) FROM risk_rules WHERE tenant_id = $1`, tenant.ID); n != 0 {
+		t.Fatalf("a refused rule was stored (%d rows)", n)
 	}
 }

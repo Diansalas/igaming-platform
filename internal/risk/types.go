@@ -100,9 +100,11 @@ const (
 // Operation is the specific action a rule/request governs - always
 // required on both a rule and a request, since "no operation" would make
 // deterministic matching impossible. Extensible via an additive
-// migration as new integration points are wired; only OperationCasinoLaunch
-// and OperationCasinoBet are actually ENFORCED by any caller this stage
-// (ADR 0031 §7) - the rest are designed, documented integration points.
+// migration as new integration points are wired. risk.Evaluate is called by
+// casino launch and bet, sportsbook bet, bonus grant/conversion and the
+// withdrawal gate (request and dispatch). OperationDeposit is NOT evaluated by
+// any caller, so risk.CreateRule refuses to author a deposit rule
+// (ErrOperationNotEvaluated) until a deposit path evaluates risk.
 type Operation string
 
 const (

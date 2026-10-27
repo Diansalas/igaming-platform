@@ -327,6 +327,14 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		denied         *LaunchGameResult
 	)
 	txErr := pool.WithTenant(ctx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// G4: tenant/brand status gate first (nothing is minted for a
+		// suspended, closed or not-yet-active tenant or brand).
+		if code, serr := CheckLaunchStatusGate(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID, params.AssetCode, params.Mode); serr != nil {
+			return serr
+		} else if code != "" {
+			denied = &LaunchGameResult{Denied: true, DenialCode: code}
+			return nil
+		}
 		mdecision, gerr := params.MarketGuard(ctx, tx)
 		if gerr != nil {
 			return fmt.Errorf("casino: operating-market gate: %w", gerr)
@@ -1106,6 +1114,48 @@ func requireActiveBrandForNewStake(ctx context.Context, tx pgx.Tx, tenantID, bra
 		return fmt.Errorf("casino: check brand status: %w", err)
 	}
 	return fmt.Errorf("%w: %w", ErrBrandNotActive, err)
+}
+
+// CheckLaunchStatusGate is the tenant/brand status gate of a casino launch
+// (licensing enforcement slice 3, G4). A launch mints a session, a token and a
+// vendor launch URL (and the HTTP handler get-or-creates a wallet first), so a
+// tenant or brand that is not 'active' must not reach any of it. It reuses the
+// same race-free shared-lock primitives postBet uses, in the same order
+// (tenant key, then brand key). Demo mode is gated identically: a demo launch
+// still mints a session bound to a wallet and the handler creates that wallet,
+// so it is not free of platform side effects (decision recorded in
+// docs/plans/lic3-enforcement-record.md).
+//
+// Returns ("", nil) when the launch may proceed. For a non-active tenant or
+// brand it writes a denial audit row in tx (committed with the denied result)
+// and returns (DenialCodeTenantOrBrandNotActive, nil). Any other failure is an
+// error (fail closed, nothing proceeds).
+func CheckLaunchStatusGate(ctx context.Context, tx pgx.Tx, tenantID, brandID, playerAccountID uuid.UUID, assetCode string, mode GameMode) (string, error) {
+	err := tenant.RequireActiveForGameplay(ctx, tx, tenantID)
+	scope := "tenant"
+	if err == nil {
+		err = tenant.RequireBrandActiveForGameplay(ctx, tx, tenantID, brandID)
+		scope = "brand"
+		if err != nil && !errors.Is(err, tenant.ErrBrandNotActiveForGameplay) {
+			return "", fmt.Errorf("casino: launch brand status gate: %w", err)
+		}
+	} else if !errors.Is(err, tenant.ErrNotActiveForGameplay) {
+		return "", fmt.Errorf("casino: launch tenant status gate: %w", err)
+	}
+	if err == nil {
+		return "", nil
+	}
+	if aerr := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino.launch_denied_by_status",
+		TargetType: "player_account", TargetID: playerAccountID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{
+			"reason_code": DenialCodeTenantOrBrandNotActive, "scope": scope, "brand_id": brandID.String(),
+			"asset_code": assetCode, "mode": string(mode),
+		},
+	}); aerr != nil {
+		return "", fmt.Errorf("casino: audit launch status denial: %w", aerr)
+	}
+	return DenialCodeTenantOrBrandNotActive, nil
 }
 
 // DeclineReasonGameUnavailable is the provider-visible decline reason for a

@@ -49,7 +49,9 @@ const (
 	// the three R-AML-* checks (A7). 3: R-MARKET-CONFIG (A8). 4 after this merge: the combined set. A request bound to an older
 	// readiness hash is stale and must be re-requested (the hash is recomputed over the current set at decision and at execution).
 	// 5: R-ALERTS no longer passes on the channel vocabulary alone; it needs an enabled, wired, human-notification route for p1 and p2.
-	SnapshotVersion = 5
+	// 6: R-RISK-RULES-LEGACY (ledger-finance condition C1) and R-KYC-POLICY (audit G9) join the activate/reactivate/ratify set.
+	// 7: R-OPERATING-BASIS (lic9, migration 0180) joins the activate/reactivate/ratify set.
+	SnapshotVersion = 7
 )
 
 // Check is one readiness check: a code, a result and a closed detail code. Never free text.
@@ -69,6 +71,9 @@ type Readiness struct {
 	Checks      []Check   `json:"checks"`
 
 	Info map[string]int64 `json:"-"`
+	// Refs are live display data like Info: rule ids (ids only, never another column) behind R-RISK-RULES-LEGACY,
+	// keyed by Refs* constant and capped at MaxRefsPerKey each. Not hashed, not persisted.
+	Refs map[string][]string `json:"-"`
 	// Balances is the per-asset sum of the subject's players' wallet-account balances
 	// (credit_total - debit_total over the wallet-bound projection rows), as DECIMAL STRINGS:
 	// NUMERIC(38,0) sums never pass through int64 or float (an 18-exponent asset overflows
@@ -147,6 +152,9 @@ type EvalInput struct {
 	Action          string
 	Licensing       *LicensingRecord
 	JurisdictionIDs []uuid.UUID
+
+	// live is set by assess to the Readiness under construction so config checks can add Info / Refs display data.
+	live *Readiness
 }
 
 // checkSetFor returns whether an action evaluates the configuration checks and whether it
@@ -183,7 +191,7 @@ func ck(code, result, detail string) Check {
 
 // configChecks evaluates the tenant-data checks inside the caller's read-only transaction. Every
 // query failure degrades its own check to not_evaluable.
-func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []Check {
+func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) ([]Check, error) {
 	var out []Check
 	now := s.now()
 	type cfg struct {
@@ -241,7 +249,11 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []C
 	}
 
 	// R-LIC-VALID: only a licence-backed basis is evaluable.
-	out = append(out, s.licenceCheck(ctx, tx, in, now))
+	lc, lerr := s.licenceCheck(ctx, tx, in, now)
+	if lerr != nil {
+		return nil, lerr
+	}
+	out = append(out, lc)
 
 	// R-RULESETS
 	switch {
@@ -365,7 +377,11 @@ func (s *Service) configChecks(ctx context.Context, tx pgx.Tx, in EvalInput) []C
 	// R-MARKET-CONFIG (A8)
 	out = append(out, s.marketConfigCheck(ctx, tx, in, now))
 	out = append(out, s.amlChecks(ctx, tx, in)...)
-	return out
+	// Lic7: both write their live display data to the Readiness the caller is building (see assess).
+	out = append(out, s.riskRulesLegacyCheck(ctx, tx, in, in.live, now), s.kycPolicyCheck(ctx, tx, in, in.live))
+	// Lic9: the explicit operating basis report (acknowledgeable, never a hard precondition); live display data as above.
+	out = append(out, s.operatingBasisCheck(ctx, tx, in, in.live, now))
+	return out, nil
 }
 
 // marketConfigCheck is R-MARKET-CONFIG (A8): the operating-market gate (internal/marketgate)
@@ -396,18 +412,24 @@ func (s *Service) marketConfigCheck(ctx context.Context, tx pgx.Tx, in EvalInput
 }
 
 // licenceCheck is R-LIC-VALID: licence-backed basis => EvaluateLicenceValidity at the evaluation time.
-func (s *Service) licenceCheck(ctx context.Context, tx pgx.Tx, in EvalInput, now time.Time) Check {
+//
+// G-12 (licensing slice 1): a licence READ ERROR now REFUSES (the error is returned and the whole evaluation fails
+// closed) instead of recording an acknowledgeable not_evaluable "read_error" check. This aligns the code with ADR 0112
+// section 8.5 ("unreadable ... licence ... refuses"); before this change only H-2's earlier read of the same row made
+// that true in practice. An invalid licence (suspended, expired, not yet issued, unbound, not found) stays an
+// acknowledgeable "fail" (ADR 0112 5.2); whether it should hard-block is a pending human decision (L-22 / G-8).
+func (s *Service) licenceCheck(ctx context.Context, tx pgx.Tx, in EvalInput, now time.Time) (Check, error) {
 	if in.Licensing == nil || in.Licensing.LicenceID == nil {
-		return ck(CheckLicenceValid, ResultNotEvaluable, "not_licence_backed")
+		return ck(CheckLicenceValid, ResultNotEvaluable, "not_licence_backed"), nil
 	}
 	v, err := jurisdiction.EvaluateLicenceValidity(ctx, tx, *in.Licensing.LicenceID, now)
 	if err != nil {
-		return ck(CheckLicenceValid, ResultNotEvaluable, "read_error")
+		return Check{}, fmt.Errorf("launchgov: read licence for R-LIC-VALID: %w", err)
 	}
 	if v == jurisdiction.LicenceValid {
-		return ck(CheckLicenceValid, ResultPass, "ok")
+		return ck(CheckLicenceValid, ResultPass, "ok"), nil
 	}
-	return ck(CheckLicenceValid, ResultFail, "licence_"+string(v))
+	return ck(CheckLicenceValid, ResultFail, "licence_"+string(v)), nil
 }
 
 // providerTierCheck is R-PROVIDER-TIER: the running process's registered components are
@@ -602,7 +624,8 @@ func cfgs2currencies(raw [][]byte) []string {
 //
 //   - RG limit enforcement is switched ON for it (a tenant-wide activation row, or for a brand subject a row
 //     of that brand): rg_enforcement_activations, migration 0158;
-//   - for EVERY allowed currency of the referenced jurisdictions, a compliance floor is in force (not absent,
+//   - for EVERY allowed currency of the referenced jurisdictions AND of every jurisdiction the tenant relies on (lic25: its licence
+//     jurisdiction and the jurisdictions of its approved operating bases), a compliance floor is in force (not absent,
 //     not a synthetic row outside dev/test) for the deposit, loss and wager kinds, composed for the subject's
 //     tenant and brand; and
 //   - no session-duration control is enabled or mandatory (session enforcement is NOT BUILT: a
@@ -648,27 +671,35 @@ func rgConfigChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []s
 	if !activated {
 		return ck(CheckRGConfig, ResultFail, "enforcement_not_enabled")
 	}
-	// SR6R-1 (same gap as the activation guard): enforcement reads the LICENCE jurisdiction, which the request's
-	// JurisdictionIDs need not contain. Add it to the set, and fail when the tenant has none.
-	var licJur *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT l.jurisdiction_id FROM tenants t LEFT JOIN licences l ON l.id = t.licence_id WHERE t.id = $1`,
-		in.Subject.TenantID).Scan(&licJur); err != nil {
+	// SR6R-1 / lic25: limit selection follows EVERY jurisdiction the tenant relies on, which the request's JurisdictionIDs need not
+	// contain: its LICENCE jurisdiction and the jurisdictions of its approved, in-force operating bases (a basis-governed scope uses the
+	// basis jurisdiction's floors; account-level limit setting uses the strictest fold of all of them). All join the set, and a
+	// tenant that relies on none (no licence, no approved basis) fails: every action of it would be rg_config_missing.
+	gov, gerr := governedJurisdictions(ctx, tx, in.Subject.TenantID)
+	if gerr != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
 	}
-	if licJur == nil {
+	if len(gov) == 0 {
 		return ck(CheckRGConfig, ResultFail, "no_licence_jurisdiction")
 	}
-	in.JurisdictionIDs = append([]uuid.UUID(nil), in.JurisdictionIDs...)
-	have := false
-	for _, j := range in.JurisdictionIDs {
-		if j == *licJur {
-			have = true
+	in.JurisdictionIDs = unionIDs(in.JurisdictionIDs, gov)
+	return rgFloorChecks(ctx, tx, in, currencies, now)
+}
+
+// unionIDs appends to base (copied) the ids of extra that it does not hold yet.
+func unionIDs(base, extra []uuid.UUID) []uuid.UUID {
+	out := append([]uuid.UUID(nil), base...)
+	seen := map[uuid.UUID]bool{}
+	for _, id := range out {
+		seen[id] = true
+	}
+	for _, id := range extra {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
 		}
 	}
-	if !have {
-		in.JurisdictionIDs = append(in.JurisdictionIDs, *licJur)
-	}
-	return rgFloorChecks(ctx, tx, in, currencies, now)
+	return out
 }
 
 // rgFloorChecks is the part of R-RG-CONFIG that does not depend on the activation row: a compliance floor in force
@@ -717,6 +748,66 @@ func rgFloorChecks(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []st
 			}
 			if (sessEnabled != nil && *sessEnabled) || (sessMandatory != nil && *sessMandatory) {
 				return ck(CheckRGConfig, ResultFail, "session_limit_not_enforced")
+			}
+		}
+	}
+	if c := rgCalendarAgreement(ctx, tx, in, currencies, now); c.Result != ResultPass {
+		return c
+	}
+	return ck(CheckRGConfig, ResultPass, "ok")
+}
+
+// rgCalendarAgreement (lic27a, S-1): the jurisdictions a tenant with approved operating bases relies on (licence UNION bases) must agree
+// on calendar_tz and week_start for every kind and currency; they cannot be ordered, so the account-level usage read fails closed on a
+// disagreement and activation must not pass in that state. Only the relied-on set is compared (a licence-only tenant has one member, so it
+// is unchanged). Fail `calendar_conflict`; a read failure is not_evaluable.
+func rgCalendarAgreement(ctx context.Context, tx pgx.Tx, in EvalInput, currencies []string, now time.Time) Check {
+	gov, err := governedJurisdictions(ctx, tx, in.Subject.TenantID)
+	if err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	if len(gov) < 2 {
+		return ck(CheckRGConfig, ResultPass, "ok")
+	}
+	rows, err := tx.Query(ctx, `SELECT code FROM jurisdictions WHERE id = ANY($1) ORDER BY code`, gov)
+	if err != nil {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	var codes []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			rows.Close()
+			return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+		}
+		codes = append(codes, c)
+	}
+	rows.Close()
+	if rows.Err() != nil || len(codes) != len(gov) {
+		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+	}
+	for _, cur := range currencies {
+		for _, kind := range []string{"deposit", "loss", "wager"} {
+			var tz *string
+			var ws *int16
+			for _, code := range codes {
+				var found bool
+				var t *string
+				var w *int16
+				if err := tx.QueryRow(ctx, `SELECT found, calendar_tz, week_start FROM rg_limit_config_compose($1, $2, $3, $4, $5, $6)`,
+					code, in.Subject.TenantID, in.Subject.BrandID, kind, cur, now).Scan(&found, &t, &w); err != nil {
+					return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
+				}
+				if !found {
+					continue // reported as floor_missing_<kind> by the floor loop
+				}
+				if tz == nil && ws == nil {
+					tz, ws = t, w
+					continue
+				}
+				if (t != nil && tz != nil && *t != *tz) || (w != nil && ws != nil && *w != *ws) {
+					return ck(CheckRGConfig, ResultFail, "calendar_conflict")
+				}
 			}
 		}
 	}
@@ -852,21 +943,18 @@ func RGActivationReadiness(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, b
 	if rows.Err() != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
 	}
-	// SR6R-1: enforcement (rg.EvaluateAction) reads its floors from the LICENCE jurisdiction (tenants.licence_id ->
-	// licences.jurisdiction_id), not from the market configuration. The guard must be at least as strict as enforcement,
-	// so the licence jurisdiction joins the set (floors required there too), and a tenant with no licence jurisdiction is
-	// refused: every action of such a tenant would be rg_config_missing.
-	var licJur *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT l.jurisdiction_id FROM tenants t LEFT JOIN licences l ON l.id = t.licence_id WHERE t.id = $1`,
-		tenantID).Scan(&licJur); err != nil {
+	// SR6R-1 / lic25: enforcement and limit setting read their floors from every jurisdiction the tenant relies on (the licence
+	// jurisdiction, and the jurisdictions of its approved operating bases), not from the market configuration. The guard must be at least
+	// as strict as enforcement, so all of them join the set (floors required there too), and a tenant that relies on none is refused:
+	// every action of such a tenant would be rg_config_missing.
+	gov, gerr := governedJurisdictions(ctx, tx, tenantID)
+	if gerr != nil {
 		return ck(CheckRGConfig, ResultNotEvaluable, "read_error")
 	}
-	if licJur == nil {
+	if len(gov) == 0 {
 		return ck(CheckRGConfig, ResultFail, "no_licence_jurisdiction")
 	}
-	if !seen[*licJur] {
-		ids = append(ids, *licJur)
-	}
+	ids = unionIDs(ids, gov)
 	if len(raw) == 0 {
 		return ck(CheckRGConfig, ResultFail, "no_jurisdiction_referenced")
 	}
@@ -875,4 +963,24 @@ func RGActivationReadiness(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, b
 		return ck(CheckRGConfig, ResultFail, "no_currency")
 	}
 	return rgFloorChecks(ctx, tx, EvalInput{Subject: Subject{TenantID: tenantID, BrandID: brandID}, JurisdictionIDs: ids}, currencies, now)
+}
+
+// licenceJurisdiction is the readiness view of the shared operator-side chain
+// (jurisdiction.ResolveLicensingChain): the licence jurisdiction id, nil when no
+// licence is bound (the caller reports it as a failing check), and an error when
+// the chain is unusable or unreadable (the caller reports not_evaluable).
+func licenceJurisdiction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*uuid.UUID, error) {
+	chain, err := jurisdiction.ResolveLicensingChain(ctx, tx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	switch chain.Outcome {
+	case jurisdiction.LicensingResolved:
+		id := chain.JurisdictionID
+		return &id, nil
+	case jurisdiction.LicensingNoLicence:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("launchgov: tenant licensing chain unusable: %s", chain.InvalidReason)
+	}
 }

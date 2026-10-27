@@ -35,6 +35,7 @@
 | `internal/identity/player_account.go` | brand and tenant status in the registering transaction, plain non-locking read (ADR 0112 7.3, S4) | refuse registration unless both `active` | A | refused (409 `BRAND_NOT_ACCEPTING_REGISTRATIONS`) |
 | `internal/identity/brand.go`, `tenant.go` | `status` of a brand / tenant row (slug / id lookups, list) | none (returned to the caller) | D | returned as `pending_launch` |
 | `internal/identity/tenant.go` (`ListActiveTenantSlugs`) | `WHERE status = 'active'` | public listing of live tenants | A | not listed |
+| `internal/aml/screening_worker.go` | `WHERE status = 'active'` | which tenants the automatic AML screening worker (lic10, MOCK provider only, never started in production) enumerates | A | not served |
 | `internal/rg/enumeration_sweep.go` | `WHERE status = 'active'` | which tenants the RG sweep enumerates | A | not swept |
 | `internal/bonus/schedulers.go` | `WHERE status = 'active'` | which tenants the bonus schedulers enumerate | A | not scheduled |
 | `internal/reconciliation/scheduler.go` | `status = 'active'` (ordinary sweep) and `status <> 'active'` (observation-only sweep, LF6) | sweep selection | A | observed like any non-active tenant; brand status is not a reconciliation dimension |

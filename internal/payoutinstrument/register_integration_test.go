@@ -540,7 +540,7 @@ func TestInstrumentPersonIsForcedFromTheAccount(t *testing.T) {
 	w := newWorld(t)
 	p, other := w.newPlayer(w.brandID), w.newPlayer(w.brandID)
 	good := w.mustRegister(p, ibanA)
-	fp := "33" + good.Fingerprint[2:]
+	fp := withPrefix(good.Fingerprint, "33")
 	if err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO payout_instrument_fingerprint_owners (tenant_id, fingerprint_kid, fingerprint, person_id) VALUES ($1,'f1',$2,$3)`, w.tenantID, fp, other.PersonID)
 		return err
@@ -593,7 +593,7 @@ func TestKindAssetTypeEnforcedByTheDatabase(t *testing.T) {
 	}
 	// And directly in SQL (the Go precheck is not the control).
 	good := w.mustRegister(p, "BE68539007547034")
-	fp := "55" + good.Fingerprint[2:]
+	fp := withPrefix(good.Fingerprint, "55")
 	if err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO payout_instrument_fingerprint_owners (tenant_id, fingerprint_kid, fingerprint, person_id) VALUES ($1,'f1',$2,$3)`, w.tenantID, fp, p.PersonID)
 		return err

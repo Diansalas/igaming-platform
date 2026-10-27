@@ -24,6 +24,8 @@ type Config struct {
 	// Proofs signs the ADR 0110 actor proofs. nil means actorproof.Default(); with neither, every call fails closed
 	// (ErrProofUnavailable).
 	Proofs *actorproof.Issuer
+	// Environment is cfg.GuardEnvironment() ("production" refuses to author a withdrawal gate before the database does; lic23 SN-5).
+	Environment string
 	// LockTimeout is SET LOCAL lock_timeout of every officer transaction (default "5s").
 	LockTimeout string
 }
@@ -121,6 +123,7 @@ var proofOperations = map[string]bool{
 	OpProofAlertRaise: true, OpProofCaseOpen: true, OpProofCaseRead: true, OpProofCaseTransition: true, OpProofCaseNote: true,
 	OpProofCaseFlagSAR: true, OpProofCasePropose: true, OpProofCaseApprove: true,
 	OpProofScreeningRecord: true, OpProofScreeningRead: true, OpProofScreeningPolicySet: true,
+	OpProofScreeningTriggerPolicySet: true, OpProofScreeningRequestRead: true, OpProofScreeningRequestReplace: true,
 }
 
 // ProofOperations lists the AML proof operation names (for tests that mirror the verifier's admission rule).

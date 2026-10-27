@@ -356,6 +356,9 @@ var prooftestImporters = map[string]bool{
 	// ADR 0115 S1: rgfix files the floor four-eyes flow (request / approve / apply proofs) for
 	// SYNTHETIC-NOT-LEGAL fixture floors; integration-tagged, pinned by the same fixture pin.
 	filepath.Join("internal", "testsupport", "rgfix"): true,
+	// lic19: kycpolfix seeds ACTIVE KYC enforcement policies for the many fixtures that need one: real platform administrators with
+	// Persons, signed creation and activation proofs. Integration-tagged, pinned by the same fixture pin.
+	filepath.Join("internal", "testsupport", "kycpolfix"): true,
 }
 
 // staticAllowedFiles are the FILE-granular signer owners (the rest of their package may not import the issuer). F4
@@ -374,9 +377,21 @@ var staticAllowed = map[string]bool{
 	// ADR 0112 slice 3: the launch authorisation service signs request / cancel / approve /
 	// reject / suspend proofs for the authenticated principal (security review mandatory).
 	filepath.Join("internal", "launchgov"): true,
+	// Migration 0177 (MKT-DUAL-1): the licensing change service signs request / approve / reject / cancel / execute proofs
+	// for the authenticated principal (security review mandatory).
+	filepath.Join("internal", "licensingchange"): true,
+	// Migration 0182 (lic11): the withdrawal restriction policy service signs request / approve / reject / cancel / execute
+	// proofs for the authenticated platform principal (security review mandatory).
+	filepath.Join("internal", "withdrawalpolicy"): true,
+	// Migration 0185 (lic19, S4): the KYC enforcement policy proof signer signs create / activate / withdraw / supersede proofs
+	// for the platform-admin principal of the transaction it is given (security review mandatory).
+	filepath.Join("internal", "kycpolicyproof"): true,
 	// ADR 0116 S3 (migrations 0140-0142): the AML officer service signs hold / case / four-eyes proofs for the authenticated
 	// officer (security review mandatory). The fixture package builds officers through the K1 flow and signs nothing itself.
 	filepath.Join("internal", "aml"): true,
+	// Migration 0181 (lic10, G8/Q21): the residence maker-checker service signs the policy set / approve and the determination
+	// approve proofs for the authenticated tenant or platform_acting staff member (security review mandatory).
+	filepath.Join("internal", "residenceapproval"): true,
 	// ADR 0119 S5 + S6 (section 10.4): the staff lifecycle service signs the platform-staff four-eyes proofs (request /
 	// approve / reject / cancel) for the authenticated platform principal (security review mandatory).
 	filepath.Join("internal", "stafflifecycle"):             true,

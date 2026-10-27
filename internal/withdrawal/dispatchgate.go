@@ -68,12 +68,40 @@ func TranslateDispatchBackstopError(err error) error {
 	return err
 }
 
-// EvaluateDispatchGate runs the WD-RG-1 gate for an existing request at a dispatch point. It returns the gate's
-// Decision (Allowed or a WD050 / WD051 denial) or an error wrapping ErrGateUnavailable. It writes nothing and takes
-// the gate's own L0.x locks only: call it BEFORE the request's L1 lock (see the file comment).
-func EvaluateDispatchGate(ctx context.Context, tx pgx.Tx, gate withdrawalgate.Gate, wr WithdrawalRequest) (withdrawalgate.Decision, error) {
+// DispatchGateOption configures EvaluateDispatchGate.
+type DispatchGateOption func(*dispatchGateOptions)
+
+type dispatchGateOptions struct{ stage RestrictionStage }
+
+// AtRedispatch evaluates the withdrawal restriction policy at the re-dispatch stage (T2 / T12). The default is the T1p
+// dispatch stage.
+func AtRedispatch() DispatchGateOption {
+	return func(o *dispatchGateOptions) { o.stage = RestrictionStageRedispatch }
+}
+
+// EvaluateDispatchGate runs, for an existing request at a dispatch point, FIRST the tenant's withdrawal restriction policy
+// (lic11, migration 0182; restriction.go) and then the WD-RG-1 gate. It returns the Decision (Allowed, a WD050 / WD051
+// denial of the gate, or a WD056 denial of a CONFIGURED restriction policy, which skips the gate) with the restriction
+// provenance attached (Decision.Restriction), or an error wrapping ErrGateUnavailable. It writes nothing and takes the
+// gate's own L0.x locks only (the policy evaluation is plain reads): call it BEFORE the request's L1 lock (see the file
+// comment).
+func EvaluateDispatchGate(ctx context.Context, tx pgx.Tx, gate withdrawalgate.Gate, wr WithdrawalRequest, opts ...DispatchGateOption) (withdrawalgate.Decision, error) {
 	if gate == nil {
 		return withdrawalgate.Decision{}, fmt.Errorf("%w: no gate was supplied at payout dispatch", ErrGateUnavailable)
+	}
+	o := dispatchGateOptions{stage: RestrictionStageDispatch}
+	for _, f := range opts {
+		f(&o)
+	}
+	rd, err := EvaluateRestriction(ctx, tx, wr.TenantID, wr.BrandID, o.stage)
+	if err != nil {
+		return withdrawalgate.Decision{}, err
+	}
+	if rd.Refuses() {
+		if err := rd.assertRecordable(); err != nil {
+			return withdrawalgate.Decision{}, err
+		}
+		return rd.DispatchDenial(), nil
 	}
 	d, err := gate.Evaluate(ctx, tx, withdrawalgate.Input{
 		TenantID: wr.TenantID, BrandID: wr.BrandID, PlayerAccountID: wr.PlayerAccountID, WalletID: wr.WalletID,
@@ -85,6 +113,8 @@ func EvaluateDispatchGate(ctx context.Context, tx pgx.Tx, gate withdrawalgate.Ga
 	if !d.Allowed && d.GateCode != GateCodeRG && d.GateCode != GateCodeRisk {
 		return withdrawalgate.Decision{}, fmt.Errorf("%w: unrecognised gate code %q", ErrGateUnavailable, d.GateCode)
 	}
+	// The provenance is ours, never the gate implementation's.
+	d.Restriction = rd.Provenance()
 	return d, nil
 }
 
@@ -124,12 +154,34 @@ func RecordDispatchGateDecision(ctx context.Context, tx pgx.Tx, wr WithdrawalReq
 			return fmt.Errorf("withdrawal: record dispatch gate decision: %w", err)
 		}
 	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO withdrawal_gate_decisions
-		     (tenant_id, withdrawal_request_id, payment_attempt_id, stage, allowed, gate_code, reason_code, risk_outcome, restriction_in_force)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		wr.TenantID, wr.ID, attemptID, string(stage), d.Allowed, gateCode, reason, outcome, restriction,
-	); err != nil {
+	// lic11 (migration 0182): the restriction policy provenance evaluated with this decision (NULL only for a fixture
+	// decision built without one). Not part of the signed allow digest (0171 unchanged): only this function writes an
+	// allowing row, and the row is append-only.
+	var rSource, rCause, rAction *string
+	var rSetVersion *int64
+	if p := d.Restriction; p != nil {
+		src, sv := p.Source, p.SetVersion
+		rSource, rSetVersion = &src, &sv
+		if p.Cause != "" {
+			c := p.Cause
+			rCause = &c
+		}
+		if p.Action != "" {
+			a := p.Action
+			rAction = &a
+		}
+	}
+	// No provenance (d.Restriction nil): a fixture decision, or a migration test's scratch schema older than 0182 (lic17),
+	// where the 0182 columns do not exist. Naming only the pre-0182 columns is the same row as NULLs on a 0182+ schema.
+	cols := `tenant_id, withdrawal_request_id, payment_attempt_id, stage, allowed, gate_code, reason_code, risk_outcome, restriction_in_force`
+	vals := `$1, $2, $3, $4, $5, $6, $7, $8, $9`
+	args := []any{wr.TenantID, wr.ID, attemptID, string(stage), d.Allowed, gateCode, reason, outcome, restriction}
+	if d.Restriction != nil {
+		cols += `, restriction_policy_source, restriction_policy_set_version, restriction_cause, restriction_action`
+		vals += `, $10, $11, $12, $13`
+		args = append(args, rSource, rSetVersion, rCause, rAction)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_gate_decisions (`+cols+`) VALUES (`+vals+`)`, args...); err != nil {
 		return fmt.Errorf("withdrawal: record dispatch gate decision: %w", err)
 	}
 	return nil

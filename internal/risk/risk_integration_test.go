@@ -370,6 +370,12 @@ func TestRiskRules_CoreFieldsAreImmutableAndAppendOnly(t *testing.T) {
 func createTestRule(t *testing.T, pool *db.Pool, tenantID *uuid.UUID, params CreateRuleParams) Rule {
 	t.Helper()
 	params.TenantID = tenantID
+	// Licensing enforcement slice 3 (G6/G7): CreateRule now refuses deposit rules
+	// and jurisdiction-scoped rules at authoring. These fixtures author them ON
+	// PURPOSE to test the evaluator's fail-closed behaviour against legacy rows,
+	// so they use the explicit test-only bypass (pinned never to appear in
+	// production code by TestAuthoringBypassIsNeverSetByProductionCode).
+	params.TestOnlyBypassAuthoringRefusals = true
 	if params.CreatedByActorID == uuid.Nil {
 		params.CreatedByActorID = uuid.New()
 	}

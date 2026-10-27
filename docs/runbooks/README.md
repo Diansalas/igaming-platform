@@ -20,6 +20,8 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `restore-from-backup.md` — restore procedure matching the local drill
   (`deploy/drill/backup-restore-drill.sh`), findings and measured dev-dataset numbers.
 - `launch-and-suspension.md` — ADR 0112 brand/tenant launch, suspension, reactivation, closure.
+- `operating-basis.md` — lic9: how an authorised admin adds, reviews and withdraws an operating basis (platform licence, partner licence, documented no-licence basis) per tenant / brand / country / operation with no release; what the evidence fields mean; country configuration is not legal proof; no value is shipped.
+- `licence-lifecycle.md` — licensing slice 1: recording a regulator suspension / expiry / renewal, evidence reference, history, the expiry sweep alerts, interim rules and pending decisions.
 - `incident-response-and-oncall.md` — TEMPLATE: no rota or recipient exists (ALERT-DELIVERY-1 open).
 - `kill-switch-and-containment.md` — A13: stop something now (payment kill switch engage/release, casino game status, market
   disable, brand/tenant suspension); `payment-kill-switch-release-recovery.md` is its wedged-release companion.
@@ -27,6 +29,7 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `market-blocking-configuration.md` — A13: A8 operating-market gate, no-route configuration model, staging prerequisites.
 - `payout-reversal-and-amount-dispute.md` — A13: A5 governed payout reversal, amount/asset mismatch exit, negative-balance block.
 - `withdrawal-dispatch-gate.md` — F4: withdrawal gate re-run at payout dispatch, `withdrawal_gate_decisions` backstop, symptoms and residuals.
+- `withdrawal-restriction-policy.md` — lic11 (migration 0182): per-tenant withdrawal restriction policy (licence-state causes), interim default, governed changes, WD056, provenance.
 - `staff-lifecycle-and-mfa-recovery.md` — A13: joiner/mover/leaver, MFA reset and recovery, `cmd/seed-admin` break-glass.
 - `secrets-and-credential-rotation.md` — A13: inventory of every secret family and where its rotation procedure lives.
 - `test-database-hygiene.md` — A13: TEST-HYGIENE-1 scratch database policy (scratch-database reaper IMPLEMENTED in A13a).
@@ -113,3 +116,6 @@ make test-integration    # RLS tenant-isolation + HTTP integration tests,
 See `docs/architecture/00-system-overview.md` for what "the foundation"
 currently covers, and `docs/active-stage.md` for what's deferred to later
 stages.
+- `residence-maker-checker.md` — lic10: configurable per-tenant second-Person approval of residence determinations (none / into_open_market / all), default unchanged, governance of the mode itself, pending is not evidence.
+- `aml-screening-triggers.md` — lic10: governed automatic screening triggers, the durable queue, the MOCK-only worker and the withdrawal/payout gate; NOT transaction monitoring.
+- `kyc-enforcement-policy-authoring.md` — lic10: the governed KYC enforcement policy routes (create draft, four-eyes activate, supersede), no shipped thresholds.

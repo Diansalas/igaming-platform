@@ -197,7 +197,10 @@ func requestWithdrawal(t *testing.T, pool *db.Pool, f fixture, amount int64, ide
 	var wr WithdrawalRequest
 	var kycDenied *KYCDeniedError
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
+		ctx, err := markPre0182Schema(ctx, tx)
+		if err != nil {
+			return err
+		}
 		wr, err = RequestWithdrawal(ctx, tx, RequestParams{
 			TenantID:        f.tenantID,
 			BrandID:         f.brandID,

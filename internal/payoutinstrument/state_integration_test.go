@@ -329,11 +329,11 @@ func TestPlantedRows_NoOwnerRowAndUnsealedPending(t *testing.T) {
 	const ins = `INSERT INTO payout_instruments (id, tenant_id, brand_id, player_account_id, person_id, kind, rail, asset_codes, detail_ciphertext, detail_nonce,
 		detail_key_kid, detail_schema_version, display_mask, fingerprint, fingerprint_kid, instrument_seal, seal_kid)
 		VALUES ($1,$2,$3,$4,$5,'bank_account','sepa','{EUR}',$6,$7,'m1',1,'GB****5432',$8,'f1',$9,'m1')`
-	requireCode(t, plant(ins, "11"+good.Fingerprint[2:], "aa"+good.InstrumentSeal[2:]), "23503", "planted instrument without an owner row")
+	requireCode(t, plant(ins, withPrefix(good.Fingerprint, "11"), withPrefix(good.InstrumentSeal, "aa")), "23503", "planted instrument without an owner row")
 
 	// A planted PENDING row WITH an owner row but no valid seal: Verify refuses
 	// before any vendor call (T11), writes an integrity audit row, and the row stays pending.
-	fp := "22" + good.Fingerprint[2:]
+	fp := withPrefix(good.Fingerprint, "22")
 	if err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO payout_instrument_fingerprint_owners (tenant_id, fingerprint_kid, fingerprint, person_id) VALUES ($1,'f1',$2,$3)`, w.tenantID, fp, p.PersonID)
 		return err
@@ -381,7 +381,7 @@ func TestInstrumentBornPending(t *testing.T) {
 	p := w.newPlayer(w.brandID)
 	good := w.mustRegister(p, ibanA)
 	for i, state := range []string{"verified", "verification_expired", "suspended", "revoked", "rejected", "superseded"} {
-		fp := fmt.Sprintf("%02x", 0x40+i) + good.Fingerprint[2:]
+		fp := withPrefix(good.Fingerprint, fmt.Sprintf("%02x", 0x40+i))
 		if err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO payout_instrument_fingerprint_owners (tenant_id, fingerprint_kid, fingerprint, person_id) VALUES ($1,'f1',$2,$3)`, w.tenantID, fp, p.PersonID)
 			return err

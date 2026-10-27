@@ -128,8 +128,8 @@ func TestAMLChecks_CodesPinnedAndAcknowledged(t *testing.T) {
 	if CheckAMLQuorum != "R-AML-QUORUM" || CheckAMLScreening != "R-AML-SCREENING" || CheckAMLMonitoring != "R-AML-MONITORING" {
 		t.Fatal("AML readiness check codes drifted")
 	}
-	if SnapshotVersion != 5 {
-		t.Fatalf("the check set changed with A7 (2), A8 (3), A6 R-RG-CONFIG (4) and the R-ALERTS routing-readiness semantics (5), so the snapshot version is 5, got %d", SnapshotVersion)
+	if SnapshotVersion != 7 {
+		t.Fatalf("the check set changed with A7 (2), A8 (3), A6 R-RG-CONFIG (4), the R-ALERTS routing-readiness semantics (5) and lic7 R-RISK-RULES-LEGACY / R-KYC-POLICY (6) and lic9 R-OPERATING-BASIS (7), so the snapshot version is 7, got %d", SnapshotVersion)
 	}
 	r := Readiness{Version: SnapshotVersion, Environment: "test", Checks: amlChecksFrom(amlData{}, nil, 0, nil, "test")}
 	got := r.NonPassing()

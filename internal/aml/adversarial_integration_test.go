@@ -22,7 +22,14 @@ import (
 // forges the exact GUC shape of a real officer.
 
 var amlTables = []string{"aml_holds", "aml_hold_lifts", "aml_enforcement_decisions", "aml_alerts", "aml_cases", "aml_case_alerts", "aml_case_notes", "aml_case_events",
-	"aml_screening_policies", "aml_screening_results"} // migration 0154 (A7) added the last two
+	"aml_screening_policies", "aml_screening_results", // migration 0154 (A7)
+	"aml_screening_trigger_policies", "aml_screening_requests", // migration 0181 (lic10, G1)
+	"aml_screening_loosening_settings"} // migration 0190 (c4): the per-tenant screening-policy loosening capability (append-only, owner-only; catalogue decision recorded in docs/plans/c4-screening-loosening-record.md)
+
+// amlStateMachineTables are AML tables that are NOT append-only: the automatic screening queue is a guarded state machine
+// (aml_screening_requests_guard: terminal states are final, identity is immutable) that is never deleted or truncated. Every
+// other AML table is append-only.
+var amlStateMachineTables = map[string]bool{"aml_screening_requests": true}
 
 func TestRuntime_NoAccessToAMLTables_EvenWithForgedOfficerGUCs(t *testing.T) {
 	w := newWorld(t, "own_licence")
@@ -251,9 +258,18 @@ func TestAppendOnly_BindsTheOwner(t *testing.T) {
 	}
 	// Migration 0154 (A7): a screening policy version and a screening result exist too, so the row-level append-only trigger is
 	// exercised for them (an UPDATE / DELETE that matches no row never fires a row trigger).
-	if _, err := c.Svc.SetScreeningPolicy(bg, c.A(), policyInput(c.jurisdiction(), time.Now().Add(-time.Hour))); err != nil {
+	jur := c.jurisdiction()
+	if _, err := ownerSvc(t).SetScreeningPolicy(bg, c.A(), policyInput(jur, time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
+	// Migration 0181 (lic10): a trigger policy version and a screening request exist too (a registration after the policy
+	// enqueues the request), for the same reason.
+	c.bindLicence(jur)
+	if _, err := c.Svc.SetScreeningTriggerPolicy(bg, c.A(), aml.SetTriggerPolicyInput{JurisdictionID: jur, Events: []aml.TriggerEvent{aml.EventRegistration},
+		EffectiveFrom: time.Now().Add(-time.Minute), LegalReviewReference: "TEST FIXTURE REF", ReasonCode: "fixture_trigger"}); err != nil {
+		t.Fatal(err)
+	}
+	c.player()
 	if _, err := c.Svc.RecordScreening(bg, c.A(), aml.RecordScreeningInput{PersonID: c.P.PersonID, IdempotencyKey: "append-only-1", Trigger: aml.TriggerManual,
 		ProviderID: aml.MockProviderID, SubjectRef: strings.Repeat("a", 64), Lists: []aml.ListType{aml.ListSanctions}, Outcome: aml.OutcomeClear, ScreenedAt: time.Now(), Decision: aml.HoldNone}); err != nil {
 		t.Fatal(err)
@@ -266,6 +282,15 @@ func TestAppendOnly_BindsTheOwner(t *testing.T) {
 			})
 			if tbl == "aml_hold_lifts" {
 				continue // no row yet; the TRUNCATE leg below still applies
+			}
+			if tbl == "aml_screening_loosening_settings" {
+				// c4 (0190): a row exists only through an executed two-person licensing change (internal/licensingchange); this package has no
+				// licensing change service. The UPDATE / DELETE refusal WITH a row is pinned in
+				// licensingchange.TestC4_ExecutorsAndGuards_NeedAnExecutedRequestOfThisTransaction; the TRUNCATE leg below still applies.
+				continue
+			}
+			if amlStateMachineTables[tbl] && strings.HasPrefix(stmt, "UPDATE") {
+				continue // a guarded state machine (migration 0181); its transitions are pinned in screening_trigger_integration_test.go
 			}
 			if pgCode(err) != "AM005" {
 				t.Errorf("%q must be AM005 for the owner, got %v", stmt, err)

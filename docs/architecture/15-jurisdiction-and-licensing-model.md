@@ -110,22 +110,38 @@ hardcoding either region's rules into business logic.
 > canonical and binding contract; this document remains the schema/model
 > statement it is implemented against.
 
-- **Registration / geo-gating**: player's detected jurisdiction is
-  resolved, checked against the tenant's `TenantJurisdictionConfig` for a
-  matching, active row; no row or an inactive row blocks registration/play
-  and is logged (never a silent CDN-level rule).
-- **KYC/AML/RG**: `identity-compliance` resolves the applicable ruleset
-  IDs from `TenantJurisdictionConfig` at runtime — rules themselves live
-  in the compliance subsystem (`11-kyc-aml-rg-architecture.md`), keyed by
-  ruleset id, not hardcoded per region.
-- **Payments**: `payment-orchestrator` filters available methods/
-  currencies by the player's `TenantJurisdictionConfig` row before
-  routing (`07-payments-architecture.md`).
-- **Reporting**: `data-analytics` selects the export format by
-  `reporting_ruleset_id` (`12-audit-reporting-architecture.md`).
-- **Provider availability**: game/sportsbook catalogue filtering already
-  has a jurisdiction blocklist concept (Blueprint §4.3); it now resolves
-  against `TenantJurisdictionConfig` rather than a single global list.
+> **Status correction (licensing enforcement slice 3, G14).** The five bullets
+> below are the DESIGN INTENT, not behaviour. Verified against the code:
+> every one is NOT IMPLEMENTED as written; the columns they name
+> (`kyc_ruleset_id`, `aml_ruleset_id`, `rg_ruleset_id`, `reporting_ruleset_id`,
+> `allowed_currencies`, `allowed_payment_methods`, `geo_block_list`) are read
+> only by launch readiness (`internal/launchgov`), never by an enforcement path.
+> What actually runs today: KYC thresholds, RG floors and AML screening policy
+> are keyed to the tenant's LICENCE jurisdiction (`tenants.licence_id ->
+> licences.jurisdiction_id`, read through `jurisdiction.ResolveLicensingChain`);
+> per-player country access is `internal/marketgate` (KYC-verified residence);
+> payment routing has no jurisdiction or country dimension (pinned by
+> `TestRoutingRequest_HasNoJurisdictionOrCountryDimension`); the game
+> blocklist and sportsbook restrictions are armed per row and unresolved
+> players are denied when armed. See
+> `docs/plans/licensing-audit-enforcement.md` sections 2 and 4.
+
+- **Registration / geo-gating** (NOT IMPLEMENTED as written): intent was that the
+  player's detected jurisdiction is checked against the tenant's
+  `TenantJurisdictionConfig`. Today no player-scoped jurisdiction resolves
+  (`unresolved(no_signal)`); registration is gated at brand level by `marketgate`.
+- **KYC/AML/RG** (NOT IMPLEMENTED as written): intent was runtime resolution of
+  ruleset ids from `TenantJurisdictionConfig`. Today the licence jurisdiction
+  selects the rulebook; the ruleset id columns are not read.
+- **Payments** (NOT IMPLEMENTED): intent was filtering methods/currencies by the
+  `TenantJurisdictionConfig` row. Nothing filters; `allowed_payment_methods` is
+  never read at runtime.
+- **Reporting** (NOT IMPLEMENTED): `reporting_ruleset_id` is never read; no
+  per-jurisdiction export format exists.
+- **Provider availability** (PARTIALLY IMPLEMENTED): the casino game blocklist
+  and sportsbook restrictions exist and fail closed when armed, but they
+  resolve against the row's own blocklist and a server-resolved
+  `jurisdiction.Resolution`, NOT against `TenantJurisdictionConfig`.
 
 ## What this explicitly rules out
 

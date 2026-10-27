@@ -135,8 +135,19 @@ func (a Actor) validate() error {
 	return nil
 }
 
-// classify maps a database error to a service error.
+// classify maps a database error to a service error. lic29: a refusal that carries a closed HINT code keeps it (RefusalCode).
 func classify(err error) error {
+	out := classifyBase(err)
+	var pe *pgconn.PgError
+	if out != nil && errors.As(err, &pe) {
+		if _, ok := RefusalCodes[pe.Hint]; ok && pe.Hint != "" {
+			return &refusalError{code: pe.Hint, err: out}
+		}
+	}
+	return out
+}
+
+func classifyBase(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -147,6 +158,12 @@ func classify(err error) error {
 	switch pe.Code {
 	case "AM040":
 		return ErrNotFound
+	case "AT001", "AT004":
+		return fmt.Errorf("%w: %s", ErrInvalidInput, pe.Message)
+	case "AT002":
+		return ErrNotFound
+	case "AT003", "AT005":
+		return fmt.Errorf("%w: %s", ErrIllegalTransition, pe.Message)
 	case "AM001", "AM002", "AM026", "CG001", "CG020":
 		// CG001 / CG020: the session shape is not a valid staff session, or the platform principal holds no in-force grant for
 		// the tenant (an acting session cannot even be opened).

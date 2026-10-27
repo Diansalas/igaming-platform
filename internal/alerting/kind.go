@@ -158,6 +158,20 @@ func staffKind(k Kind, sev Severity, platform bool, allowed ...string) KindDef {
 // (ALERT-DELIVERY-1 OPEN: nobody is paged).
 const KindAMLHoldEvalFailed Kind = "aml.hold_eval_failed"
 
+// KindAMLScreeningAttention is the lic10 (migration 0181) Kind raised by the automatic AML screening worker: a request ended
+// in a state a human must look at, either a match awaiting an officer (reason match_review) or a request that failed terminally
+// (reason failed_terminal). Raised in the SAME transaction as the state change. Attributes are the request id, a closed reason
+// and the closed trigger name: NEVER the person, the list, the match or any vendor text (ADR 0116 s5.2, no tipping off). Severity
+// p2 is an ENGINEERING DEFAULT (ALERT-DELIVERY-1 OPEN: nobody is paged).
+const KindAMLScreeningAttention Kind = "aml.screening_attention"
+
+// KindAMLScreeningGateTrapped is the lic18 (migration 0181, ledger-finance H-1 f) Kind: one or more persons have been HELD at the
+// automatic-screening withdrawal gate for longer than the policy's alert threshold, so funds may be trapped. The only attribute is
+// the COUNT of persons (never an id). One open alert per tenant (re-raises add occurrences). Severity p1 is an ENGINEERING DEFAULT
+// (ALERT-DELIVERY-1 OPEN: nobody is paged unless a route exists). Raised by the screening worker's pass, so a DEAD worker cannot
+// raise it (recorded residual).
+const KindAMLScreeningGateTrapped Kind = "aml.screening_gate_trapped"
+
 // KindReconciliationSweepFailed is the A9 (migration 0156) platform, subjectless P1 Kind: the reconciliation
 // scheduler could not LIST tenants (phase list_active or list_non_active; R3-LISTING-FAILURE-LOG-ONLY-1) or a
 // whole sweep panicked (phase panic), so no tenant was (fully) reconciled in that sweep. Per-tenant failures
@@ -189,6 +203,31 @@ const KindWithdrawalPayoutGateUnavailable Kind = "withdrawal.payout_gate_unavail
 // request_id): NEVER the country. The discriminator is verification:<verification_id>, so one open alert per
 // determination and a re-review of the same row only adds an occurrence. Severity p2 is an ENGINEERING DEFAULT.
 const KindKYCResidenceIntoOpenMarket Kind = "kyc.residence_into_open_market"
+
+// KindLicenceExpired (p1) and KindLicenceExpiring (p2) are the licensing slice 1 (migration 0176) Kinds raised by the
+// read-only licence expiry / review sweep (internal/jurisdiction.RunLicenceSweepLoop): a licence in use by at least one
+// tenant has expired (status 'expired', or expires_at reached under EvaluateLicenceValidity) or will reach expires_at /
+// review_due_at within the warning window. Platform-scoped and subjectless (a licence can be shared by many tenants), raised ONLY by
+// RaiseLicenceSweep under the alert_dispatcher platform-service identity. Attributes are ids, counts and dates only
+// (tenant_ids / brand_ids are bounded comma-separated id lists; the exact counts are separate attributes). Severities are ENGINEERING
+// DEFAULTS pending the owner decision on recipients (ALERT-DELIVERY-1 OPEN: nobody is paged). The sweep never suspends
+// a brand or a licence.
+const (
+	KindLicenceExpired  Kind = "licence.expired"
+	KindLicenceExpiring Kind = "licence.expiring"
+	// KindLicenceUnmonitored (p2, migration 0178, security review F-3): a licence in use by a tenant that the expiry / review
+	// sweep cannot monitor because it records no expires_at (trigger "no_expiry_recorded"). Ids only.
+	KindLicenceUnmonitored Kind = "licence.unmonitored"
+	// KindLicenceSweepFailed (p1, migration 0178, security review F-3): the licence sweep itself failed (phase "list_tenants",
+	// "tenant_read" or "raise"; error_count). The safety net did not run completely. Platform, subjectless, dispatcher-only.
+	KindLicenceSweepFailed Kind = "licence.sweep_failed"
+)
+
+func licenceKind(k Kind, sev Severity) KindDef {
+	return KindDef{Kind: k, Severity: sev, Scope: ScopeKindPlatform, RequiresSubject: false, InTxRaisableByTenant: false,
+		RaiseMode:   RaiseModeDetached,
+		AllowedKeys: keys("licence_id", "trigger", "expires_at", "review_due_at", "tenant_count", "brand_count", "tenant_ids", "brand_ids", "truncated")}
+}
 
 func keys(ks ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ks))
@@ -305,6 +344,16 @@ var kindDefs = map[Kind]KindDef{
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
 		AllowedKeys: keys("operation"),
 	},
+	KindAMLScreeningAttention: {
+		Kind: KindAMLScreeningAttention, Severity: SeverityP2, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
+		AllowedKeys: keys("request_id", "reason", "trigger"),
+	},
+	KindAMLScreeningGateTrapped: {
+		Kind: KindAMLScreeningGateTrapped, Severity: SeverityP1, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
+		AllowedKeys: keys("persons"),
+	},
 	KindWithdrawalPayoutGateDenied: {
 		Kind: KindWithdrawalPayoutGateDenied, Severity: SeverityP2, Scope: ScopeKindPlatform,
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
@@ -319,6 +368,14 @@ var kindDefs = map[Kind]KindDef{
 		Kind: KindReconciliationSweepFailed, Severity: SeverityP1, Scope: ScopeKindPlatform,
 		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,
 		AllowedKeys: keys("phase", "sqlstate_class"),
+	},
+	KindLicenceExpired:     licenceKind(KindLicenceExpired, SeverityP1),
+	KindLicenceExpiring:    licenceKind(KindLicenceExpiring, SeverityP2),
+	KindLicenceUnmonitored: licenceKind(KindLicenceUnmonitored, SeverityP2),
+	KindLicenceSweepFailed: {
+		Kind: KindLicenceSweepFailed, Severity: SeverityP1, Scope: ScopeKindPlatform,
+		RequiresSubject: false, InTxRaisableByTenant: false, RaiseMode: RaiseModeDetached,
+		AllowedKeys: keys("phase", "error_count"),
 	},
 	KindAlertingUnrouted: {
 		Kind: KindAlertingUnrouted, Severity: SeverityP2, Scope: ScopeKindPlatform,

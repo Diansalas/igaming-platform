@@ -391,6 +391,22 @@ const (
 	// only.
 	PermKYCEnforcementDecisionRead Permission = "kyc_enforcement_decision:read"
 
+	// PermKYCEnforcementPolicyManage / PermKYCEnforcementPolicyRead (lic10, L-20): author, activate, supersede and
+	// withdraw the PLATFORM-WIDE kyc_enforcement_policies rows (one set per licence jurisdiction), and read them.
+	// platform_admin ONLY, like every other platform-wide registry write; never a tenant role (the table is platform
+	// configuration, not tenant data). The four-eyes (creator versus activator) is the database's, not this
+	// permission's: holding it never lets one principal both author and activate a row.
+	PermKYCEnforcementPolicyManage Permission = "kyc_enforcement_policy:manage"
+	PermKYCEnforcementPolicyRead   Permission = "kyc_enforcement_policy:read"
+
+	// PermResidenceApprovalPolicyManage / PermResidenceApprovalPolicyRead (lic10, migration 0181, audit G8 / owner question Q21):
+	// file and approve a change of a tenant's residence determination maker-checker mode (none | into_open_market | all), and
+	// read it. Manage: compliance (its own tenant) only; there is no platform_acting path
+	// (it would widen the ADR 0099 acting-session allow-list). Read: also tenant_admin. The controls that matter (stricter
+	// is one actor, less strict needs two approvals by distinct Persons, signed actor proofs) are the database's, whatever the role.
+	PermResidenceApprovalPolicyManage Permission = "residence_approval_policy:manage"
+	PermResidenceApprovalPolicyRead   Permission = "residence_approval_policy:read"
+
 	// PermPlayerResidenceRead gates reading a player's declared or verified
 	// residence VALUE on a staff-facing surface (presence/provenance fields
 	// are NOT gated by this - they ride on PermVerificationRead/PermPlayerRead
@@ -749,6 +765,52 @@ const (
 	PermLaunchAuthorisationRead    Permission = "launch_authorisation:read"
 )
 
+// Migration 0177 (MKT-DUAL-1, licensing / jurisdiction maker-checker). STATIC route-level authority,
+// deliberately not grantable through any capability catalogue and never usable in an acting session. The
+// controls that matter (the closed kind registry, widening = two approvals by distinct staff AND distinct
+// Persons other than the requester's, approvals at most 24 h old, signed actor proofs, the governed-table
+// guard) are the database's and internal/licensingchange's, whatever the role. INTERIM (HDR-M-1 pending):
+// only platform_admin approves.
+//
+//   - PermLicensingChangeRequest: file / cancel a change. platform_admin (any kind, platform scope);
+//     tenant_admin and compliance for the tenant-requestable kinds of their OWN tenant only (the kind's own
+//     operating-market permission is checked too; the database refuses a platform-only kind or a foreign
+//     subject from a tenant session).
+//   - PermLicensingChangeApprove: approve or reject. platform_admin ONLY.
+//   - PermLicensingChangeRead: read requests and approvals (a tenant reads the ones about itself).
+const (
+	PermLicensingChangeRequest Permission = "licensing_change:request"
+	PermLicensingChangeApprove Permission = "licensing_change:approve"
+	PermLicensingChangeRead    Permission = "licensing_change:read"
+
+	// PermJurisdictionRegistryRead (lic4 slice 4a): the READ half of the platform jurisdiction / licence registry and of the
+	// platform-wide read views a Back Office needs (jurisdictions, licences with their bound tenants, licence country
+	// ceilings, a tenant's operating-country policies and jurisdiction configurations). platform_admin ONLY (the same role set
+	// that holds PermJurisdictionRegistryManage); never granted to a tenant role.
+	PermJurisdictionRegistryRead Permission = "jurisdiction_registry:read"
+
+	// PermOperatingBasisTenantRead (c2): read the caller's OWN tenant's operating bases through the redacted, tenant-scoped
+	// projection (GET /v1/admin/tenant/operating-bases). tenant_admin and compliance ONLY (the roles that already read the tenant's
+	// own withdrawal restriction policy and licensing changes); never platform_admin (which has the platform routes under
+	// PermJurisdictionRegistryRead and no tenant), support, finance or any other role. Read-only: a basis is changed only by a
+	// licensing change. Deliberately NOT PermJurisdictionRegistryRead, which is platform-wide and never granted to a tenant role.
+	PermOperatingBasisTenantRead Permission = "operating_basis:tenant_read"
+)
+
+// lic11 (migration 0182): the governed per-tenant withdrawal restriction policy. STATIC route-level authority; the
+// controls that matter (closed cause registry, widening = two approvals by distinct staff AND distinct Persons other than
+// the requester's, approvals at most 24 h old, signed actor proofs, append-only versions, the governed-write guard) are
+// the database's and internal/withdrawalpolicy's, whatever the role.
+//
+//   - PermWithdrawalRestrictionPolicyChange: request / approve / reject / cancel a policy change. platform_admin ONLY
+//     (platform scope; a tenant never writes its own withdrawal restriction policy).
+//   - PermWithdrawalRestrictionPolicyRead: read the effective policy, its versions and (platform only) the change
+//     requests. platform_admin (every tenant), tenant_admin and compliance (their OWN tenant, read-only).
+const (
+	PermWithdrawalRestrictionPolicyChange Permission = "withdrawal_restriction_policy:change"
+	PermWithdrawalRestrictionPolicyRead   Permission = "withdrawal_restriction_policy:read"
+)
+
 // ADR 0115 slice S2 (RG limits write APIs). STATIC route-level authority; the controls that matter
 // (tighten-only operator rows, floor four-eyes by distinct staff AND Person, signed actor proofs,
 // player-confirm of increases) are the database's and internal/rg's, whatever the role.
@@ -858,6 +920,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// RoleTenantAdmin, even though RoleTenantAdmin holds the broader
 		// PermVerificationRead.
 		PermKYCEnforcementDecisionRead,
+		// lic10 (L-20): platform-wide KYC enforcement policy authoring; platform_admin only.
+		PermKYCEnforcementPolicyManage, PermKYCEnforcementPolicyRead,
 		// PRH-I1 (ADR 0095 §10.4/§10.5): platform reach over every
 		// tenant's kill switches, through the same route family
 		// RoleTenantAdmin uses for its own tenant (canActOnTenant).
@@ -887,6 +951,12 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermWithdrawalHoldResolutionRequest, PermWithdrawalHoldResolutionApprove, PermWithdrawalHoldResolutionRead,
 		// ADR 0112 slice 3 (6.1): platform_admin is the ONLY holder of :approve.
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationApprove, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
+		// Migration 0177 (MKT-DUAL-1): platform_admin is the ONLY holder of :approve (interim, HDR-M-1).
+		PermLicensingChangeRequest, PermLicensingChangeApprove, PermLicensingChangeRead,
+		// lic11 (migration 0182): platform_admin is the ONLY writer of withdrawal restriction policies.
+		PermWithdrawalRestrictionPolicyChange, PermWithdrawalRestrictionPolicyRead,
+		// lic4 slice 4a: platform-wide registry reads (platform_admin ONLY).
+		PermJurisdictionRegistryRead,
 		// ADR 0115 S2: jurisdiction-floor change requests (platform_admin ONLY; four-eyes is the database's).
 		PermRGFloorRead, PermRGFloorRequest, PermRGFloorDecide,
 		// ADR 0116 s6 (A7): the static half of the AML officer gates; the aml_officer grant + acting session are the authority.
@@ -917,6 +987,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 	// staff and approve withdrawals, that requires two separate role
 	// grants on two separate accounts, never one role bundling both.
 	RoleTenantAdmin: permSet(
+		PermResidenceApprovalPolicyRead, // lic10 (migration 0181): read-only visibility of its own tenant's residence maker-checker mode
 		PermTenantRead, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
 		PermStaffRead, // ADR 0119 S5 + S6: own tenant only (the routes enforce the tenant)
@@ -1003,6 +1074,12 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// ADR 0112 slice 3 (6.1): request and suspend for the tenant's OWN brands, plus read.
 		// Never :approve.
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
+		// Migration 0177: request (own tenant, tenant-requestable kinds) and read; never :approve.
+		PermLicensingChangeRequest, PermLicensingChangeRead,
+		// lic11 (migration 0182): read the tenant's OWN withdrawal restriction policy; never change it.
+		PermWithdrawalRestrictionPolicyRead,
+		// c2: read the tenant's OWN operating bases (redacted projection); never platform-wide.
+		PermOperatingBasisTenantRead,
 		// ADR 0115 S2: read a player's RG limits and the config in force; never write.
 		PermRGLimitRead, PermRGConfigRead,
 	),
@@ -1040,6 +1117,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Stage 4F: the sole grantee of PermVerificationReview, plus
 		// read visibility - see both permissions' own doc comments.
 		PermVerificationRead, PermVerificationReview,
+		// lic10 (migration 0181): the residence determination maker-checker policy of its OWN tenant.
+		PermResidenceApprovalPolicyManage, PermResidenceApprovalPolicyRead,
 		// Stage 4I Phase B: the sole grantee of PermPlayerResidenceRead and
 		// PermJurisdictionEvidenceCollectionActivate - see both
 		// permissions' own doc comments for why they sit with Compliance
@@ -1081,6 +1160,12 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// ADR 0112 slice 3 (6.1): compliance may request and suspend for its tenant's own
 		// brands and read; never :approve.
 		PermLaunchAuthorisationRequest, PermLaunchAuthorisationSuspend, PermLaunchAuthorisationRead,
+		// Migration 0177: request (own tenant, tenant-requestable kinds) and read; never :approve.
+		PermLicensingChangeRequest, PermLicensingChangeRead,
+		// lic11 (migration 0182): read the tenant's OWN withdrawal restriction policy; never change it.
+		PermWithdrawalRestrictionPolicyRead,
+		// c2: read the tenant's OWN operating bases (redacted projection); never platform-wide.
+		PermOperatingBasisTenantRead,
 		// ADR 0115 S2: compliance is the sole writer of operator RG bounds and of limit changes on a
 		// player's request (decreases only until ADR 0017 step-up ships).
 		PermRGLimitRead, PermRGLimitWriteOnPlayerRequest, PermRGConfigRead, PermRGConfigWrite,

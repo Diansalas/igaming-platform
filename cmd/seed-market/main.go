@@ -22,8 +22,12 @@
 //   - IDEMPOTENT: an identical open version (enabled + active) is reported and left alone; a DIFFERENT open version
 //     (disabled / withdrawn) is REFUSED, because turning a closed country back on is a governed decision this tool does
 //     not make; it never writes a duplicate version;
-//   - the country must equal MOCK_GEOLOCATION_COUNTRY when that is set; MKT-DUAL-1 (four-eyes on market enablement) is still
-//     OPEN: two humans review the parameters by process;
+//   - the country must equal MOCK_GEOLOCATION_COUNTRY when that is set. MKT-DUAL-1 (four-eyes on market enablement) is
+//     implemented for every RUNTIME writer by migration 0177 (internal/licensingchange: two approvals by distinct Persons,
+//     signed actor proofs; the database refuses any other runtime write, LC040). This tool is the TABLE-OWNER synthetic
+//     seeding path (the staging runner connects as the owner, the same documented owner path as the ADR 0112 LF2
+//     provisioning); it still refuses production (APP_ENV and the database_environment anchor, unchanged), and two humans
+//     review its parameters by process;
 //   - the database password never appears here: DATABASE_URL carries none (PGPASSFILE / PGPASSWORD supply it).
 //
 // After the writes it re-resolves the policy for registration, deposit, casino wagering and sportsbook wagering for the

@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 )
 
 // Hard precondition failure codes (ADR 0112 5.2). They refuse; nothing else does. In particular
@@ -27,9 +29,14 @@ const (
 	H2Determination       = "H-2:determination_required"
 	H2StatusMismatch      = "H-2:licensing_status_mismatch"
 	H2UnknownModel        = "H-2:unknown_licensing_model"
-	H3NoJurisdiction      = "H-3:no_jurisdiction"
-	H3ConfigMissing       = "H-3:config_missing_or_not_in_effect"
-	H6WithdrawalsHolding  = "H-6:withdrawals_holding_funds"
+	// H2StatusContradictsRegistry (G-8): the recorded licensing_status is in_force while the bound licence is not
+	// valid at the evaluation time (EvaluateLicenceValidity != valid). An untrue record is refused; recording
+	// suspended / expired / applied_pending / conditional for an invalid licence stays possible and the validity
+	// itself stays an acknowledgeable R-LIC-VALID check (whether to hard-block is a pending human decision).
+	H2StatusContradictsRegistry = "H-2:licensing_status_contradicts_licence_registry"
+	H3NoJurisdiction            = "H-3:no_jurisdiction"
+	H3ConfigMissing             = "H-3:config_missing_or_not_in_effect"
+	H6WithdrawalsHolding        = "H-6:withdrawals_holding_funds"
 	// H6HoldBalanceNonZero (ADR 0113 s4.3, LA025): a player_withdrawal_hold balance of the subject's
 	// player wallets is not zero, whether or not a hold-bearing request still exists (a stranded hold,
 	// the HD-CTF-4 population). Closure is refused; suspension is the lever (ADR 0113 s8 Q1).
@@ -109,7 +116,12 @@ func (s *Service) assess(ctx context.Context, in EvalInput) (assessment, error) 
 				return err
 			}
 			a.Failures = append(a.Failures, f...)
-			a.Readiness.Checks = append(a.Readiness.Checks, s.configChecks(ctx, tx, in)...)
+			in.live = &a.Readiness
+			cc, err := s.configChecks(ctx, tx, in)
+			if err != nil {
+				return err
+			}
+			a.Readiness.Checks = append(a.Readiness.Checks, cc...)
 		}
 		if doFunds {
 			a.Readiness.Checks = append(a.Readiness.Checks, fundsCheck(ctx, tx, in.Subject, in.Action, &a.Readiness))
@@ -208,6 +220,15 @@ func (s *Service) licensingFailures(ctx context.Context, tx pgx.Tx, tenantID uui
 			}
 			if tLicence == nil || *tLicence != *rec.LicenceID {
 				fails = append(fails, H2TenantBinding)
+			}
+			if rec.Status == LicStatusInForce {
+				v, verr := jurisdiction.EvaluateLicenceValidity(ctx, tx, *rec.LicenceID, s.now())
+				if verr != nil {
+					return nil, fmt.Errorf("launchgov: evaluate licence validity: %w", verr)
+				}
+				if v != jurisdiction.LicenceValid {
+					fails = append(fails, H2StatusContradictsRegistry)
+				}
 			}
 		}
 	}

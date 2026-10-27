@@ -267,8 +267,20 @@ func TestStaffRoutes_EveryMutatingRouteClassified(t *testing.T) {
 	// A10c: +GET payment-attempts/{attemptID}/events, +GET reconciliation/runs/{runID}, +GET reconciliation/mismatches/{mismatchID},
 	// +GET withdrawal-hold-candidates (4 reads) = 222 routes, 135 mutating.
 	// F6 / SA-3: +GET /v1/admin/platform/status (1 read) = 223 routes, 135 mutating.
-	if mutating != 135 || len(staffRouteGolden) != 223 {
-		t.Errorf("golden table: %d routes, %d mutating; pinned 223 and 135", len(staffRouteGolden), mutating)
+	// Licensing slice 1 (migration 0176): +4 licence lifecycle PUTs, +1 GET licence versions = 228 routes, 139 mutating.
+	// Licensing slice 2 (migration 0177, MKT-DUAL-1): +6 licensing change routes (2 reads, 4 mutating) = 234 routes, 143 mutating.
+	// lic4 slice 4a: +5 platform reads (jurisdiction by id, licence by id, licence country ceilings, operating country policies,
+	// tenant jurisdiction configs) = 239 routes, 143 mutating (the lifecycle PUTs keep their routes).
+	// lic9 (migration 0180): +2 platform reads (operating bases list and get); filing uses the existing POST /v1/admin/licensing-changes.
+	// lic10 (L-20): +GET and +4 POST KYC enforcement policy routes (1 read, 4 mutating) = 244 routes, 147 mutating.
+	// lic10 (migration 0181, G8/Q21): +2 reads, +3 mutating residence maker-checker routes = 249 routes, 150 mutating; merged with lic9: 251 routes.
+	// c2: +2 reads (tenant-scoped operating bases list and get): 268 routes, 158 mutating.
+	if mutating != 158 || len(staffRouteGolden) != 268 {
+		t.Errorf("golden table: %d routes, %d mutating; pinned 268 and 158", len(staffRouteGolden), mutating)
+		// lic11 (migration 0182): +8 withdrawal restriction policy routes (4 reads, 4 mutating): 259 routes, 154 mutating (summed with lic9 and lic10).
+		// lic23 (N-4): +1 mutating (POST .../requests/replace): 264 routes, 157 mutating.
+		// lic29: +GET and +POST /screening/policy (1 read, 1 mutating): 266 routes, 158 mutating.
+		// lic18: +2 reads, +2 mutating AML screening trigger-policy and officer-resolution routes: 263 routes, 156 mutating.
 	}
 }
 

@@ -169,9 +169,21 @@ func TestStepUp_GoldenTable_EveryClassifiedRoute(t *testing.T) {
 	// Owner decision 3 (SRME-1): POST /v1/admin/kyc/verifications/{id}/review became the classifier kycResidenceReviewClass: none-mutating 42 -> 41.
 	// A10c: +4 reads (attempt events, reconciliation single run, single mismatch, hold candidates): read 87; nothing mutating changes.
 	// F6 / SA-3: +1 read (GET /v1/admin/platform/status): read 88; nothing mutating changes.
-	if counts["critical"] != 64 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
+	// Licensing slice 1 (migration 0176): +4 critical (PUT licence status / validity-dates / review-due / evidence-reference), +1 read (GET licence versions): critical 68, read 89.
+	// Licensing slice 2 (migration 0177): +2 critical (POST licensing-changes, approve), +2 none-mutating (reject, cancel), +2 reads: critical 70, none-mutating 43, read 91.
+	// lic4 slice 4a: +5 reads (jurisdiction / licence by id, ceilings, policies, tenant jurisdiction configs): read 96.
+	// lic9 (migration 0180): +2 reads (operating bases list and get); merged with lic10: read 101.
+	// lic10 (L-20): +4 critical (POST enforcement-policies, activate, withdraw, supersede), +1 read (GET enforcement-policies): critical 74, read 97.
+	// lic11 (migration 0182): +2 critical (request, approve), +2 none-mutating (reject, cancel), +4 reads: critical 78, none-mutating 46, read 105 (summed with lic9 and lic10).
+	// lic10 (migration 0181): +2 critical (policy approvals, determination approval), +1 none-mutating (POST policy), +2 reads: critical 76, none-mutating 44, read 99.
+	// lic18: +2 critical (screening trigger-policy set, officer resolution), +2 reads: critical 80, none-mutating 46, read 107. The
+	// integ-b merge left the none-mutating and read pins at the lic10-only values (44 / 101) although the comments above sum to 46 / 105.
+	// lic23: +1 critical (POST .../screening/persons/{personID}/requests/replace): critical 81.
+	// lic29: +1 critical (POST .../screening/policy), +1 read (GET .../screening/policy): critical 82, read 108.
+	// c2: +2 reads (GET /v1/admin/tenant/operating-bases and /{basisID}, tenant-scoped, step-up none): read 110.
+	if counts["critical"] != 82 || counts["classifier:alertRouteManageClass"] != 1 || counts["financial"] != 22 || counts["classifier:launchActionClass"] != 1 ||
 		counts["classifier:financialPolicyChangeClass"] != 1 || counts["classifier:alertResolveClass"] != 1 ||
-		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 41 || counts["read"] != 88 {
+		counts["classifier:rgLimitChangeClass"] != 1 || counts["classifier:amlHoldPlaceClass"] != 1 || counts["classifier:amlTransitionClass"] != 1 || counts["classifier:kycResidenceReviewClass"] != 1 || counts["none-mutating"] != 46 || counts["read"] != 110 {
 		t.Fatalf("unexpected coverage: %v", counts)
 	}
 	for _, r := range skipped {

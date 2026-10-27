@@ -31,8 +31,19 @@ func TestStepUpOperations_RegistryPinned(t *testing.T) {
 		"staff_lifecycle:request": stepup.Critical, "staff_lifecycle:approve": stepup.Critical,
 		// ADR 0116 A7: AML hold lift and the proposal / approval halves of an AML four-eyes action.
 		"aml_hold:lift": stepup.Critical, "aml_case:propose": stepup.Critical, "aml_case:approve": stepup.Critical,
+		"aml_screening_trigger_policy:set": stepup.Critical,
 		// ADR 0110 T8 (migration 0165): each half of a four-eyes payout reversal.
 		"withdrawal_payout_reversal:decide": stepup.Critical,
+		// Migration 0177 (MKT-DUAL-1): filing, approving and executing a licensing / jurisdiction change.
+		"licensing_change:request": stepup.Critical, "licensing_change:approve": stepup.Critical, "licensing_change:execute": stepup.Critical,
+		// lic10 (migration 0181): the two approval halves of the residence determination maker-checker (the policy filing is protective).
+		"residence_policy:approve": stepup.Critical, "residence_determination:approve": stepup.Critical,
+		// lic11 (migration 0182): filing, approving and executing a withdrawal restriction policy change.
+		"withdrawal_restriction_policy:request": stepup.Critical, "withdrawal_restriction_policy:approve": stepup.Critical,
+		"withdrawal_restriction_policy:execute": stepup.Critical,
+		// lic19 (migration 0185): every KYC enforcement policy write.
+		"kyc_enforcement_policy:create": stepup.Critical, "kyc_enforcement_policy:activate": stepup.Critical,
+		"kyc_enforcement_policy:withdraw": stepup.Critical, "kyc_enforcement_policy:supersede": stepup.Critical,
 	}
 	if len(StepUpOperations) != len(want) {
 		t.Fatalf("registry has %d operations, ADR 0119 section 9.1 pins %d", len(StepUpOperations), len(want))
@@ -45,7 +56,8 @@ func TestStepUpOperations_RegistryPinned(t *testing.T) {
 	// The protective operations are never in the registry (section 8.1 / 9.1 exemptions).
 	for _, op := range []string{OpAdjustmentReject, OpAdjustmentCancel, OpResolutionReject, OpResolutionCancel, OpHoldResolutionReject,
 		OpHoldResolutionCancel, OpGrantReject, OpGrantCancel, OpPolicyReject, OpPolicyCancel, OpLaunchSuspend, OpLaunchCancel,
-		OpLaunchReject, OpRGConfigReject, OpRGConfigCancel, OpStaffLifecycleReject, OpStaffLifecycleCancel} {
+		OpLaunchReject, OpRGConfigReject, OpRGConfigCancel, OpStaffLifecycleReject, OpStaffLifecycleCancel,
+		OpLicensingChangeReject, OpLicensingChangeCancel, OpResidencePolicySet, OpWithdrawalRestrictionReject, OpWithdrawalRestrictionCancel} {
 		if _, ok := StepUpOperations[op]; ok {
 			t.Errorf("%s is protective and must not require step-up", op)
 		}

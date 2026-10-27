@@ -15,6 +15,9 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/operatingmarket"
 )
 
 // Service errors. The registration refusals are mapped to ONE generic player
@@ -420,7 +423,7 @@ func (s *Service) Verify(ctx context.Context, db TxRunner, tenantID, instrumentI
 				return ErrKYCNotVerified
 			}
 		}
-		ma, err := maxAgeFor(ctx, tx, tenantID)
+		ma, err := maxAgeFor(ctx, tx, plan.inst)
 		if err != nil {
 			return err
 		}
@@ -531,18 +534,79 @@ func (s *Service) auditIntegrity(ctx context.Context, db TxRunner, tenantID, ins
 	})
 }
 
-func maxAgeFor(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (*time.Duration, error) {
-	var licenceID *uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&licenceID); err != nil {
-		return nil, fmt.Errorf("payoutinstrument: read tenant licence: %w", err)
+// FreshnessJurisdiction selects the jurisdiction whose payout-verification freshness window applies (lic23 N-7 / SN-3), the SAME way
+// the KYC rulebook does (lic14, internal/operatingmarket/rulebook.go):
+//   - a tenant with NO approved, in-force operating basis: the tenant's licence jurisdiction exactly as before (a tenant with no
+//     licence has no window configured: resolved=false);
+//   - a tenant WITH bases: the governing basis for the player's scope (brand, verified residence country, the withdrawal operation):
+//     the basis row's jurisdiction or its licence's. When the scope has no row the tenant's own licence governs; a basis tenant
+//     with no licence, no verified residence country or a basis that does not permit is unresolvable and FAILS CLOSED (an error).
+//
+// The licence and the basis jurisdictions are never merged and no value is invented: one governing jurisdiction's configured
+// window applies, as for KYC thresholds.
+func FreshnessJurisdiction(ctx context.Context, tx pgx.Tx, inst Instrument) (jid uuid.UUID, resolved bool, err error) {
+	var asOf time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&asOf); err != nil {
+		return uuid.Nil, false, fmt.Errorf("payoutinstrument: %w", err)
 	}
-	if licenceID == nil {
-		return nil, nil
+	has, err := operatingmarket.TenantHasApprovedBasis(ctx, tx, inst.TenantID, asOf)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("payoutinstrument: %w", err)
+	}
+	if has {
+		country, ok, err := kyc.ReadMarketResidenceEvidence(ctx, tx, inst.TenantID, inst.PlayerAccountID)
+		if err != nil {
+			return uuid.Nil, false, fmt.Errorf("payoutinstrument: %w", err)
+		}
+		if !ok {
+			return uuid.Nil, false, fmt.Errorf("payoutinstrument: tenant has operating bases but the player has no verified residence country: the freshness window cannot be selected (fail closed)")
+		}
+		q := operatingmarket.RulebookQuery{TenantID: inst.TenantID, CountryCode: country, OperationCode: "withdrawal", AsOf: asOf}
+		if inst.BrandID != uuid.Nil {
+			b := inst.BrandID
+			q.BrandID = &b
+		}
+		rb, err := operatingmarket.ResolveRulebookJurisdiction(ctx, tx, q)
+		if err != nil {
+			return uuid.Nil, false, fmt.Errorf("payoutinstrument: %w", err)
+		}
+		switch rb.State {
+		case operatingmarket.RulebookBasis:
+			return rb.JurisdictionID, true, nil
+		case operatingmarket.RulebookLegacy:
+			// The scope has no basis row: the tenant's licence governs; a basis tenant with no licence is never "no window".
+		default:
+			return uuid.Nil, false, fmt.Errorf("payoutinstrument: the governing basis of the player's scope is unavailable (%s): the freshness window cannot be selected (fail closed)", rb.Reason)
+		}
+	}
+	chain, err := jurisdiction.ResolveLicensingChain(ctx, tx, inst.TenantID)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("payoutinstrument: %w", err)
+	}
+	switch chain.Outcome {
+	case jurisdiction.LicensingResolved:
+		return chain.JurisdictionID, true, nil
+	case jurisdiction.LicensingNoLicence:
+		if has {
+			return uuid.Nil, false, fmt.Errorf("payoutinstrument: tenant has an operating basis but no governing licence jurisdiction for this scope: the freshness window cannot be selected (fail closed, lic14)")
+		}
+		return uuid.Nil, false, nil
+	default:
+		return uuid.Nil, false, fmt.Errorf("payoutinstrument: tenant licensing chain unusable: %s", chain.InvalidReason)
+	}
+}
+
+func maxAgeFor(ctx context.Context, tx pgx.Tx, inst Instrument) (*time.Duration, error) {
+	jid, resolved, err := FreshnessJurisdiction(ctx, tx, inst)
+	if err != nil {
+		return nil, err
+	}
+	if !resolved {
+		return nil, nil // unchanged: no licence and no basis = no jurisdiction freshness window configured
 	}
 	var secs *float64
-	err := tx.QueryRow(ctx, `SELECT extract(epoch FROM m.max_age)::float8
-		FROM licences l JOIN payout_instrument_verification_max_age m ON m.jurisdiction_id = l.jurisdiction_id
-		WHERE l.id = $1`, *licenceID).Scan(&secs)
+	err = tx.QueryRow(ctx, `SELECT extract(epoch FROM m.max_age)::float8
+		FROM payout_instrument_verification_max_age m WHERE m.jurisdiction_id = $1`, jid).Scan(&secs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

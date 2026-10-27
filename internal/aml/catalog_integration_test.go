@@ -88,9 +88,20 @@ func TestCatalog_AMLTables_RLSPrivilegesPoliciesTriggers(t *testing.T) {
 		}
 		// Append-only triggers: a row trigger for UPDATE OR DELETE and a statement trigger for TRUNCATE, enabled.
 		trg := catalogQuery(t, w, `SELECT count(*) FILTER (WHERE (tgtype & 1) = 1 AND (tgtype & 16) <> 0 AND (tgtype & 8) <> 0 AND tgenabled = 'O'),
-				count(*) FILTER (WHERE (tgtype & 1) = 0 AND (tgtype & 32) <> 0 AND tgenabled = 'O')
+				count(*) FILTER (WHERE (tgtype & 1) = 0 AND (tgtype & 32) <> 0 AND tgenabled = 'O'),
+				count(*) FILTER (WHERE (tgtype & 1) = 1 AND (tgtype & 16) = 0 AND (tgtype & 8) <> 0 AND tgenabled = 'O')
 			FROM pg_trigger WHERE tgrelid = $1::regclass AND NOT tgisinternal AND tgfoid = 'aml_deny_mutation'::regproc`, tbl)[0]
-		if trg[0].(int64) != 1 || trg[1].(int64) != 1 {
+		if amlStateMachineTables[tbl] {
+			// Migration 0181: a guarded state machine: DELETE and TRUNCATE are denied, UPDATE goes through the guard trigger.
+			if trg[0].(int64) != 0 || trg[1].(int64) != 1 || trg[2].(int64) != 1 {
+				t.Errorf("%s: want a DELETE-only row trigger and a TRUNCATE trigger of aml_deny_mutation (no UPDATE denial), got %v", tbl, trg)
+			}
+			g := catalogQuery(t, w, `SELECT count(*) FROM pg_trigger WHERE tgrelid = $1::regclass AND NOT tgisinternal AND tgenabled = 'O'
+				AND (tgtype & 16) <> 0 AND (tgtype & 4) <> 0 AND tgfoid::regproc::text = $2`, tbl, tbl+"_guard")[0][0]
+			if g.(int64) != 1 {
+				t.Errorf("%s: want exactly one enabled INSERT OR UPDATE guard trigger %s_guard", tbl, tbl)
+			}
+		} else if trg[0].(int64) != 1 || trg[1].(int64) != 1 {
 			t.Errorf("%s: want one UPDATE/DELETE row trigger and one TRUNCATE trigger of aml_deny_mutation, got %v", tbl, trg)
 		}
 		// Every FK to persons / player_accounts / tenants is ON DELETE RESTRICT (C9).
@@ -111,12 +122,18 @@ func TestCatalog_AMLFunctions_DefinerSearchPathAndPrivileges(t *testing.T) {
 		"aml_case_add_note": true, "aml_case_flag_sar": true, "aml_case_propose": true, "aml_case_approve": true, "aml_case_read": true,
 		"aml_case_events_list": true, "aml_case_notes_list": true, "aml_case_queue": true,
 		// migration 0154 (A7): screening policy / record / list and the launch readiness reader.
-		"aml_screening_policy_set": true, "aml_screening_policy_effective": true, "aml_screening_record": true, "aml_screening_list": true,
+		"aml_screening_policy_author": true, "aml_screening_policy_effective": true, "aml_screening_record": true, "aml_screening_list": true,
 		"aml_readiness": true,
+		// migration 0181 (lic10, G1): the trigger policy, the officer request read and the worker API.
+		"aml_screening_trigger_policy_author": true, "aml_screening_trigger_policy_effective": true, "aml_screening_request_list": true,
+		"aml_screening_enqueue_due": true, "aml_screening_request_claim": true, "aml_screening_request_finish": true,
+		// lic18: the trapped-person count (a count only, session-tenant bound). lic23: the officer replace (authorises first).
+		"aml_screening_gate_overdue": true, "aml_screening_request_replace": true, "aml_screening_parked_summary": true, "aml_screening_parked_overdue": true,
 	}
 	// SECURITY DEFINER but NOT executable by the runtime role: the erasure check (until the HD-RET-1 job is its caller, security F5)
 	// and the platform-grantee liveness helper (reachable only through the owner-run definer chain, security F1/F3).
-	definerNoRuntime := map[string]bool{"aml_person_has_records": true, "aml_platform_grantee_live": true}
+	// d1 (migration 0191, D7): the loosening-capable break-glass setter aml_screening_policy_set is OWNER-ONLY (pin moved here from apiRuntime); d1 D4 (0191): so is aml_screening_trigger_policy_set (the runtime route is the tighten-only aml_screening_trigger_policy_author).
+	definerNoRuntime := map[string]bool{"aml_person_has_records": true, "aml_platform_grantee_live": true, "aml_screening_policy_set": true, "aml_screening_trigger_policy_set": true}
 	owner := catalogQuery(t, w, `SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = 'public.aml_holds'::regclass`)[0][0].(string)
 	rows := catalogQuery(t, w, `SELECT p.oid::regprocedure::text, p.proname, p.prosecdef, coalesce(array_to_string(p.proconfig, ','), ''), pg_get_userbyid(p.proowner),
 			has_function_privilege('igaming_runtime', p.oid, 'EXECUTE'), has_function_privilege('public', p.oid, 'EXECUTE')
@@ -176,7 +193,12 @@ func TestCatalog_EveryOfficerFunctionAuthorisesFirst(t *testing.T) {
 	rows := catalogQuery(t, w, `SELECT p.proname, p.prosrc FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'aml\_%' AND p.prosecdef`)
 	// 0154: the policy and readiness readers are proof-less, session-tenant-bound reads (no result, hold, case or person is disclosed).
 	noProof := map[string]bool{"aml_hold_active": true, "aml_hold_match": true, "aml_record_enforcement_decision": true, "aml_person_has_records": true,
-		"aml_screening_policy_effective": true, "aml_readiness": true}
+		"aml_screening_policy_effective": true, "aml_readiness": true,
+		// migration 0181: the trigger policy reader and the worker API are proof-less, session-tenant-bound (the worker is not an officer).
+		"aml_screening_trigger_policy_effective": true, "aml_screening_enqueue_due": true, "aml_screening_request_claim": true,
+		"aml_screening_request_finish": true,
+		// lic18: the trapped-person count (a count only, session-tenant bound, proof-less like the worker API).
+		"aml_screening_gate_overdue": true, "aml_screening_parked_summary": true, "aml_screening_parked_overdue": true}
 	for _, r := range rows {
 		name, src := r[0].(string), r[1].(string)
 		if name == "aml_platform_grantee_live" {

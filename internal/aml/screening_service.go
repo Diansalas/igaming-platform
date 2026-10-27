@@ -279,6 +279,10 @@ func (s *Service) EffectiveScreeningPolicy(ctx context.Context, a Actor, jurisdi
 	return p, err
 }
 
+// ScreeningPolicyInput is the name the HTTP layer uses for SetScreeningPolicyInput (the HTTP layer must not name the loosening-capable
+// setter, SR7-3, and the static pin searches for that identifier).
+type ScreeningPolicyInput = SetScreeningPolicyInput
+
 // SetScreeningPolicyInput is the next VERSION of a tenant's screening policy for one licensing jurisdiction. Every value is a
 // human compliance decision: there is no default, and the legal review reference is required.
 type SetScreeningPolicyInput struct {
@@ -318,8 +322,34 @@ func (in SetScreeningPolicyInput) validate() error {
 }
 
 // SetScreeningPolicy writes the next policy version. Platform officer (platform_acting) only, and only with the owner-scope
-// officer quorum met; the database refuses anything else.
+// officer quorum met; the database refuses anything else. NOT routed (SR7-3): it can loosen screening.
 func (s *Service) SetScreeningPolicy(ctx context.Context, a Actor, in SetScreeningPolicyInput) (uuid.UUID, error) {
+	return s.writeScreeningPolicy(ctx, a, in, "aml_screening_policy_set")
+}
+
+// MinRescreenInterval is the ENGINEERING safety floor of the re-screen interval over HTTP (lic30 M-3; NOT a legal value): below it every
+// clear expires within the hour (all withdrawals freeze behind the gate) and the scheduled enqueue floods. The database applies it too
+// (migration 0189), together with "at least twice the gate alert threshold of the jurisdiction", which Go cannot see.
+const MinRescreenInterval = time.Hour
+
+// AuthorScreeningPolicy (lic29) is what the HTTP route calls: the same authorisation and row as SetScreeningPolicy through the
+// database function aml_screening_policy_author (migration 0189), which additionally refuses a version that is LESS STRICT than the
+// latest one (a list removed, a longer re-screen interval or grace, an earlier effective time). Loosening is NOT done here: since migration 0190 (c4) it is the governed two-person licensing change aml_screening_policy_loosen (internal/licensingchange), inert until a platform administrator configures it.
+func (s *Service) AuthorScreeningPolicy(ctx context.Context, a Actor, in SetScreeningPolicyInput) (uuid.UUID, error) {
+	// lic30: the same bounds the database applies (aml_screening_policy_author), refused before a proof is signed.
+	if in.EffectiveFrom.IsZero() {
+		return uuid.Nil, fmt.Errorf("%w: an effective time is required", ErrInvalidInput)
+	}
+	if now := time.Now(); in.EffectiveFrom.Before(now.Add(-2*time.Minute)) || in.EffectiveFrom.After(now.Add(30*24*time.Hour)) {
+		return uuid.Nil, coded("policy_effective_from_out_of_range", fmt.Errorf("%w: effective_from must be between now (2 minutes tolerance) and 30 days ahead", ErrInvalidInput))
+	}
+	if in.RescreenInterval < MinRescreenInterval {
+		return uuid.Nil, coded("rescreen_interval_below_floor", fmt.Errorf("%w: the re-screen interval is below the safety floor of %s", ErrInvalidInput, MinRescreenInterval))
+	}
+	return s.writeScreeningPolicy(ctx, a, in, "aml_screening_policy_author")
+}
+
+func (s *Service) writeScreeningPolicy(ctx context.Context, a Actor, in SetScreeningPolicyInput, fn string) (uuid.UUID, error) {
 	if err := in.validate(); err != nil {
 		return uuid.Nil, err
 	}
@@ -332,7 +362,7 @@ func (s *Service) SetScreeningPolicy(ctx context.Context, a Actor, in SetScreeni
 		if err := s.attachProof(ctx, tx, a, OpProofScreeningPolicySet, actorproof.TargetNew, hash); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `SELECT aml_screening_policy_set($1, $2, $3, $4, $5, $6, $7, $8)`,
+		return tx.QueryRow(ctx, `SELECT `+fn+`($1, $2, $3, $4, $5, $6, $7, $8)`,
 			a.TenantID, in.JurisdictionID, sortedLists(in.Lists), rescreen, grace, from, in.LegalReviewReference, in.ReasonCode).Scan(&id)
 	})
 	return id, err

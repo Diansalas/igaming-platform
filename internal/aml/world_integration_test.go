@@ -12,9 +12,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
+	"github.com/Diansalas/igaming-platform/internal/aml"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/amlfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
@@ -62,6 +64,15 @@ func runtimePool(t testing.TB) *db.Pool {
 		t.Fatalf("the runtime pool must be neither superuser nor BYPASSRLS (super=%v bypass=%v): the tests would pass for the wrong reason", super, bypass)
 	}
 	return p
+}
+
+// ownerSvc is the OWNER-ONLY fixture path to the break-glass screening policy setter (aml_screening_policy_set). Since migration 0191
+// (d1, D7) the runtime role can no longer execute that function, so a fixture that needs its un-restricted behaviour (any interval,
+// loosening, a past effective time) changes the ACTOR it runs as (the table-owner pool), not the assertion it makes. The officer
+// authorisation, quorum and signed proof inside the function are unchanged.
+func ownerSvc(t testing.TB) *aml.Service {
+	t.Helper()
+	return amlfix.OwnerService(t, ownerPool(t))
 }
 
 // amlWorld is one tenant with a brand, players and (on request) an officer quorum.

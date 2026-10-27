@@ -28,6 +28,11 @@ type rgLimitOptionResponse struct {
 	Ceiling                 *string  `json:"ceiling"`
 	Scope                   string   `json:"scope,omitempty"`
 	IncreaseCooldownSeconds *int64   `json:"increase_cooldown_seconds"`
+	// UnavailableReason (lic27a): missing_floor | calendar_conflict. Absent when the kind's options are offered. missing_floor: the server
+	// refuses increases, removals and confirms; calendar_conflict: none is offered and play fails closed, the server does not refuse them.
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
+	// ProtectiveOnly (lic28): allowed_periods then holds only the periods usable for a first limit or a lower value of this kind.
+	ProtectiveOnly bool `json:"protective_only,omitempty"`
 }
 
 type rgOptionsResponse struct {
@@ -48,7 +53,7 @@ func toRGOptionsResponse(o rg.Options) rgOptionsResponse {
 			periods = append(periods, string(p))
 		}
 		resp.Limits = append(resp.Limits, rgLimitOptionResponse{Kind: string(l.Kind), ConfigInForce: l.ConfigInForce, Mandatory: l.Mandatory,
-			AllowedPeriods: periods, Ceiling: l.Ceiling, Scope: string(l.Scope), IncreaseCooldownSeconds: l.IncreaseCooldownSeconds})
+			AllowedPeriods: periods, Ceiling: l.Ceiling, Scope: string(l.Scope), IncreaseCooldownSeconds: l.IncreaseCooldownSeconds, UnavailableReason: l.UnavailableReason, ProtectiveOnly: l.ProtectiveOnly})
 	}
 	if resp.TimeOutHours == nil {
 		resp.TimeOutHours = []int{}

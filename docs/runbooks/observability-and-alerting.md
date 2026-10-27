@@ -297,6 +297,21 @@ deliberately left untouched - see "Known gaps" below):
   response, but jurisdiction/geo-blocking is a distinct category from
   the RG/Risk policy category this event exists to make alertable).
   Field: `reason_code`.
+- **`casino_launch_refused_tenant_or_brand_not_active`**
+  (`internal/httpserver/casino_handlers.go`, licensing enforcement slice
+  3, G4) - WARN, a casino launch (real or demo) was refused because the
+  tenant or the player's brand is not `active`. Also written as the
+  audit action `casino.launch_denied_by_status`. Nothing was minted and
+  no wallet was created. Expected after a suspension; an unexpected
+  burst for an `active` brand means the status read is failing.
+- **`kyc_enforcement_dormant`** (`internal/kyc/enforcement.go`,
+  licensing enforcement slice 3, G9) - WARN, once per process per
+  (tenant, operation, reason): a KYC decision defaulted to
+  `not_required` because the tenant has no licence bound
+  (`no_licence_bound`) or no active policy exists
+  (`no_active_policy`). It is a default-ALLOW signal, not an error, and
+  changes no decision. Fields: `tenant_id`, `operation`, `reason`.
+  Follow-up read: `kyc.ListDormantJurisdictionTriggers`.
 
 ## 2. Minimum alert-rule list (to configure once a real backend exists)
 
@@ -459,6 +474,8 @@ remain the day-one signal for everything not listed here.
 | Kill switch engaged (a platform takeover of a tenant-engaged switch is its own alert) | `payment.kill_switch_engaged` (p2) | `switch:<kill_switch_id>` / `switch:<kill_switch_id>:takeover`; `reason_code` is a closed token or `nonconforming` | after commit, then status, headers and body bytes are flushed (the chunked body ends only when the handler returns), then the detached raise |
 | A reviewer recorded a KYC-verified residence in a country the brand serves (`market.residence_into_open_market` audit action) | `kyc.residence_into_open_market` (p2) | `verification:<kyc_verification_id>`; attributes `verification_id`, `brand_id`, `request_id`, never the country | in the review transaction (`alerting.InTx` + `RaiseGuarded`), with the audit row; a non-swallowable alert failure rolls the whole review back |
 | The WD-RG-1 gate (or the signer of its allow) could not decide at a payout dispatch point and failed closed (F4 residual, migration 0171; see `withdrawal-dispatch-gate.md`) | `withdrawal.payout_gate_unavailable` (p2) | `withdrawal:<id>:gate_unavailable` (T1p, every refusal) / `payout_attempt:<id>:gate_unavailable` (T2 / T12, after 3 consecutive failed ticks); attributes `stage`, `cause` | detached (the claim rolled back) |
+| A licence in use by at least one tenant has expired: status `expired`, or `expires_at` reached (licensing slice 1, migration 0176; read-only sweep `jurisdiction.RunLicenceSweepLoop`, hourly) | `licence.expired` (p1) | `licence:<licence_id>`; platform-scoped, subjectless (a licence can be shared by many tenants); attributes `licence_id`, `trigger`, `expires_at`, `review_due_at`, `tenant_count`, `brand_count`, `tenant_ids`, `brand_ids` (bounded comma-separated id lists), `truncated` | detached, under the `alert_dispatcher` platform-service identity; a failed write is logged and never stops the loop |
+| A licence in use by at least one tenant reaches `expires_at` or `review_due_at` within the warning window (30 days, an interim default) or its review is overdue | `licence.expiring` (p2) | same as `licence.expired` | same |
 | Deposit simulation payload mismatch | `simulation.payment.payload_mismatch` (p3, simulation) | `provider:<provider_id>` | detached; **never delivered, never paged** |
 
 Not wired yet (listed honestly): casino-play and sportsbook-settlement
@@ -880,6 +897,29 @@ What to check, per alert (acknowledge it only after these):
    a determination followed at once by a deposit are escalation triggers (security / compliance lead), not routine.
 5. If a determination is wrong: the correction is a new review of the verification (`rejected`, or a fresh determination), which
    withdraws or replaces the evidence immediately (`internal/kyc/market_evidence.go`); never edit `kyc_verifications` by hand.
+
+### Runbook: `licence.expired` (P1) and `licence.expiring` (P2) (licensing slice 1)
+
+Raised by the licence expiry / review sweep, which runs hourly inside platform-api (`jurisdiction.RunLicenceSweepLoop`). It is
+READ-ONLY and DETECTIVE: it never suspends a brand, a tenant or a licence, and never changes a row. Enforcement is unchanged: the
+operating-market gate already refuses registration, deposit, casino launch and sportsbook wagering for every tenant whose bound
+licence is not valid (suspended, expired by status, `expires_at` reached, not yet issued, unbound), on the next request. Withdrawals are
+not market-gated. Whether expiry should auto-suspend brands is a pending human decision (see `licence-lifecycle.md`).
+
+One open alert per licence and Kind (`licence:<licence_id>`); the hourly sweep adds an occurrence to it. `trigger` is one of
+`status_expired`, `expires_at_reached` (the licence is not valid ON its `expires_at` date), `expires_at_soon`, `review_due`
+(including an overdue review). The affected tenants and brands are the ids in the attributes (capped at 15 ids each, with exact
+counts and `truncated`). A licence bound to no tenant affects nobody and raises nothing. The list reflects the tenants and brands at
+the time of the first raise of the open alert; read the live binding with the tenant's licence and `GET /v1/admin/licences`.
+The window (30 days) is a configuration constant, `jurisdiction.LicenceExpiryWarningWindowDays`, an interim default pending the owner
+decision. Severity is an engineering default; nothing pages anyone until a human configures a route.
+
+What to do: `licence.expired`: confirm with compliance what the regulator state is; record it with the lifecycle endpoints
+(`PUT /v1/admin/licences/{id}/status` or `/validity-dates`, platform admin, step-up, reason code); decide per brand whether to suspend
+it through the launch-governance suspend action (single actor, immediate); resolve the alert only after the registry shows the true
+state. `licence.expiring`: start the renewal or review with the licence owner; record the new `expires_at` / `review_due_at` and the
+`licence_evidence_reference` (an opaque reference to the evidence held elsewhere) when the renewal is confirmed. Never record a date or
+a reference the business has not supplied.
 
 ### Runbook: `reconciliation.run_failed` (P1, per tenant and stream)
 

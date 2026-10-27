@@ -205,7 +205,7 @@ func TestStatic_AMClassOnlyInAMLMigrations(t *testing.T) {
 			t.Fatal(err)
 		}
 		isAML := strings.HasPrefix(e.Name(), "0140_") || strings.HasPrefix(e.Name(), "0141_") || strings.HasPrefix(e.Name(), "0142_") ||
-			strings.HasPrefix(e.Name(), "0154_") || strings.HasPrefix(e.Name(), "0155_") // A7: the screening + readiness migration (0154) and its sanctions_potential follow-up (0155) are AML migrations
+			strings.HasPrefix(e.Name(), "0154_") || strings.HasPrefix(e.Name(), "0155_") || strings.HasPrefix(e.Name(), "0181_") || strings.HasPrefix(e.Name(), "0189_") || strings.HasPrefix(e.Name(), "0190_") || strings.HasPrefix(e.Name(), "0191_") || strings.HasPrefix(e.Name(), "0192_") // d1 (0192): the screening clear provenance re-issues the 0181 gate, scheduler, finish and officer record (AM codes of aml_screening_record); d1 (0191): the tighten-only trigger policy author (AM002 platform_officer_required) and the owner-only setters are AML migrations; c4 (0190): the governed screening policy loosening re-issues the 0154 policy guard (AM001) in an AML-owned table;  lic29 (0189): the tighten-only screening policy author is an AML migration (it reuses the 0154 policy function's AM codes); lic10 (0181): the automatic screening trigger part is an AML migration (it re-issues aml_hold_active with its AM codes and calls aml_authorize); A7: the screening + readiness migration (0154) and its sanctions_potential follow-up (0155) are AML migrations
 		if re.Match(b) {
 			if !isAML {
 				t.Errorf("%s uses SQLSTATE class AM, which belongs to the AML migrations", e.Name())

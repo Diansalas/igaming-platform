@@ -43,6 +43,22 @@ export const LAUNCH_ERROR_CODES = [
 ] as const;
 export type LaunchErrorCode = (typeof LAUNCH_ERROR_CODES)[number];
 
+/** OpenAPI Error.code: every LICENSING_CHANGE_* code the licensing routes can answer (migration 0177). */
+export const LICENSING_CHANGE_ERROR_CODES = [
+  'LICENSING_CHANGE_SELF_APPROVAL',
+  'LICENSING_CHANGE_NOT_PENDING',
+  'LICENSING_CHANGE_ALREADY_DECIDED',
+  'LICENSING_CHANGE_DUPLICATE_PENDING',
+  'LICENSING_CHANGE_APPROVALS_STALE',
+  'LICENSING_CHANGE_REFUSED',
+  'LICENSING_CHANGE_GUARD_REFUSED',
+  'LICENSING_CHANGE_RETRYABLE_LOCK_TIMEOUT',
+  'LICENSING_CHANGE_PROOF_REFUSED',
+  'LICENSING_CHANGE_NO_PERSON',
+  'LICENSING_CHANGE_UNAVAILABLE',
+] as const;
+export type LicensingChangeErrorCode = (typeof LICENSING_CHANGE_ERROR_CODES)[number];
+
 /** Stable, machine-readable error codes the API returns (apierror.Code). */
 export type ApiErrorCode =
   | 'validation_error'
@@ -62,6 +78,7 @@ export type ApiErrorCode =
   | 'KILL_SWITCH_RELEASE_REQUEST_ALREADY_OPEN'
   // ADR 0112 section 9: the closed LAUNCH_* set (internal/apierror).
   | LaunchErrorCode
+  | LicensingChangeErrorCode
   // ADR 0119 S3 staff-auth codes (docs/plans/adr0119-s3-api-contract.md section 2).
   | 'mfa_enrolment_required'
   | 'mfa_locked'

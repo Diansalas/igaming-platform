@@ -61,10 +61,36 @@ var StepUpOperations = map[string]stepup.Class{
 	OpAMLHoldLift:    stepup.Critical,
 	OpAMLCasePropose: stepup.Critical,
 	OpAMLCaseApprove: stepup.Critical,
+	// lic18 (migration 0181): the screening trigger policy can disable a withdrawal gate (loosens a control).
+	OpAMLScreeningTriggerPolicySet: stepup.Critical,
 	// ADR 0110 T8 (migration 0165): each half of a four-eyes payout reversal (credits house money to a player,
 	// or releases a hold on the tombstone branch); the route POST /v1/admin/withdrawals/{id}/payout-reversal is
 	// critical in the golden table.
 	OpPayoutReversalDecide: stepup.Critical,
+	// Migration 0177 (MKT-DUAL-1): filing a licensing / jurisdiction change, approving one and executing one (the final
+	// approver, or the requester of a single-actor narrowing change, executes it) are critical; the reject and cancel
+	// operations are protective and absent. The routes POST /v1/admin/licensing-changes and .../{changeID}/approve, and the
+	// two legacy routes that now file a change (POST /v1/admin/licences, PUT /v1/admin/tenants/{tenantID}/licence), are
+	// critical in the golden table.
+	// lic10 (migration 0181): the two approval operations of the residence maker-checker loosen a control (an approval makes a
+	// determination market evidence, or relaxes the policy), so they are critical; residence_policy:set only tightens or files a
+	// pending request (protective) and is absent.
+	OpResidencePolicyApprove:        stepup.Critical,
+	OpResidenceDeterminationApprove: stepup.Critical,
+	OpLicensingChangeRequest:        stepup.Critical,
+	OpLicensingChangeApprove:        stepup.Critical,
+	OpLicensingChangeExecute:        stepup.Critical,
+	// lic11 (migration 0182): filing, approving and executing a withdrawal restriction policy change (reject / cancel are
+	// protective). The routes POST /v1/admin/withdrawal-restriction-policy-changes and .../{changeID}/approve are critical
+	// in the golden table.
+	// lic19 (migration 0185): every KYC enforcement policy write is critical (the routes are critical in the golden table).
+	OpKYCPolicyCreate:              stepup.Critical,
+	OpKYCPolicyActivate:            stepup.Critical,
+	OpKYCPolicyWithdraw:            stepup.Critical,
+	OpKYCPolicySupersede:           stepup.Critical,
+	OpWithdrawalRestrictionRequest: stepup.Critical,
+	OpWithdrawalRestrictionApprove: stepup.Critical,
+	OpWithdrawalRestrictionExecute: stepup.Critical,
 }
 
 // stepUpBackstopMaxAge is the backstop's max-age per class: the section 7.4

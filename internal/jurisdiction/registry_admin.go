@@ -97,6 +97,10 @@ type Jurisdiction struct {
 	CreatedAt   time.Time
 }
 
+// ErrDuplicateJurisdictionCode marks, next to ErrInvalidInput, a jurisdiction code that already exists (c1: the closed refusal
+// code duplicate_jurisdiction_code). Its text is empty on purpose: it only travels as a marker.
+var ErrDuplicateJurisdictionCode = errors.New("")
+
 // CreateJurisdictionParams is CreateJurisdiction's input.
 type CreateJurisdictionParams struct {
 	Code           string
@@ -148,7 +152,7 @@ func CreateJurisdiction(ctx context.Context, tx pgx.Tx, p CreateJurisdictionPara
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return Jurisdiction{}, fmt.Errorf("%w: jurisdiction code %q already exists", ErrInvalidInput, code)
+			return Jurisdiction{}, fmt.Errorf("%w: jurisdiction code %q already exists%w", ErrInvalidInput, code, ErrDuplicateJurisdictionCode)
 		}
 		return Jurisdiction{}, fmt.Errorf("jurisdiction: insert jurisdictions row: %w", err)
 	}
@@ -268,6 +272,12 @@ type Licence struct {
 	PermittedProducts []string
 	PermittedMarkets  []string
 	CreatedAt         time.Time
+	// Lifecycle fields (migration 0176). Dates are UTC calendar dates (nil = not recorded).
+	IssuedAt          *time.Time
+	ExpiresAt         *time.Time
+	ReviewDueAt       *time.Time
+	EvidenceReference string // "" = none recorded
+	UpdatedAt         time.Time
 }
 
 // CreateLicenceParams is CreateLicence's input. PermittedProducts/
@@ -299,15 +309,12 @@ type CreateLicenceParams struct {
 var validLicensees = map[string]bool{"platform": true, "tenant": true}
 
 // CreateLicence inserts a `licences` row. Status always starts 'active'
-// (migration 0002's own default) - this file deliberately does not
-// expose a status-transition operation: no Stage 4I consumer needs one,
-// and CLAUDE.md's no-uncontrolled-scope rule applies to admin surfaces
-// too (a suspend/expire operation is a legitimate future addition should
-// a real consumer need it; see task registry item MKT-LICSTATUS-1). tx
-// must be a platform-scoped transaction (db.Pool.WithPlatformAdmin) -
-// asserted in-function via assertPlatformScope, as its FIRST statement,
-// AND enforced independently by migration 0077's licences_platform_admin_
-// insert RLS policy.
+// (migration 0002's own default). Status, dates, review date and evidence
+// reference are changed ONLY by licence_lifecycle.go's audited Set* functions.
+// tx must be a platform-scoped transaction (db.Pool.WithPlatformAdmin) -
+// asserted in-function via assertPlatformScope, as its FIRST statement, AND
+// enforced independently by migration 0077's licences_platform_admin_insert
+// RLS policy.
 func CreateLicence(ctx context.Context, tx pgx.Tx, p CreateLicenceParams) (Licence, error) {
 	if err := assertPlatformScope(ctx, tx); err != nil {
 		return Licence{}, err
@@ -346,9 +353,9 @@ func CreateLicence(ctx context.Context, tx pgx.Tx, p CreateLicenceParams) (Licen
 	err = tx.QueryRow(ctx, `
 		INSERT INTO licences (jurisdiction_id, licensee, licence_number, permitted_products, permitted_markets)
 		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, jurisdiction_id, licensee, licence_number, status, created_at`,
+		RETURNING id, jurisdiction_id, licensee, licence_number, status, created_at, updated_at`,
 		p.JurisdictionID, p.Licensee, p.LicenceNumber, productsJSON, marketsJSON,
-	).Scan(&l.ID, &l.JurisdictionID, &l.Licensee, &l.LicenceNumber, &l.Status, &l.CreatedAt)
+	).Scan(&l.ID, &l.JurisdictionID, &l.Licensee, &l.LicenceNumber, &l.Status, &l.CreatedAt, &l.UpdatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
@@ -380,7 +387,8 @@ func ListLicences(ctx context.Context, tx pgx.Tx) ([]Licence, error) {
 	if err := assertPlatformScope(ctx, tx); err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(ctx, `SELECT id, jurisdiction_id, licensee, licence_number, status, permitted_products, permitted_markets, created_at FROM licences ORDER BY created_at`)
+	rows, err := tx.Query(ctx, `SELECT id, jurisdiction_id, licensee, licence_number, status, permitted_products, permitted_markets, created_at,
+		issued_at, expires_at, review_due_at, COALESCE(evidence_reference, ''), updated_at FROM licences ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("jurisdiction: list licences: %w", err)
 	}
@@ -389,7 +397,8 @@ func ListLicences(ctx context.Context, tx pgx.Tx) ([]Licence, error) {
 	for rows.Next() {
 		var l Licence
 		var productsJSON, marketsJSON []byte
-		if err := rows.Scan(&l.ID, &l.JurisdictionID, &l.Licensee, &l.LicenceNumber, &l.Status, &productsJSON, &marketsJSON, &l.CreatedAt); err != nil {
+		if err := rows.Scan(&l.ID, &l.JurisdictionID, &l.Licensee, &l.LicenceNumber, &l.Status, &productsJSON, &marketsJSON, &l.CreatedAt,
+			&l.IssuedAt, &l.ExpiresAt, &l.ReviewDueAt, &l.EvidenceReference, &l.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("jurisdiction: scan licence row: %w", err)
 		}
 		if err := json.Unmarshal(productsJSON, &l.PermittedProducts); err != nil {
@@ -414,6 +423,8 @@ func licenceState(l Licence) map[string]any {
 	return map[string]any{
 		"id": l.ID.String(), "jurisdiction_id": l.JurisdictionID.String(), "licensee": l.Licensee,
 		"licence_number": l.LicenceNumber, "status": l.Status,
+		"issued_at": dateString(l.IssuedAt), "expires_at": dateString(l.ExpiresAt), "review_due_at": dateString(l.ReviewDueAt),
+		"evidence_reference": l.EvidenceReference,
 		"permitted_products": l.PermittedProducts, "permitted_markets": l.PermittedMarkets,
 	}
 }

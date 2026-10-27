@@ -83,7 +83,7 @@ func TestReadiness_AML_FollowsQuorumPolicyAndProvider(t *testing.T) {
 	if m[launchgov.CheckAMLQuorum].Result != launchgov.ResultPass {
 		t.Fatalf("two officers are a quorum: %+v", m[launchgov.CheckAMLQuorum])
 	}
-	svc := amlfix.Service(t, w.rt)
+	svc := amlfix.OwnerService(t, w.owner) // d1 (0191): the break-glass setter is owner-only
 	if _, err := svc.SetScreeningPolicy(ctx, q.Officers[0].Actor, aml.SetScreeningPolicyInput{JurisdictionID: j, Lists: []aml.ListType{aml.ListSanctions},
 		RescreenInterval: time.Hour, EffectiveFrom: time.Now().Add(-time.Hour), LegalReviewReference: "TEST FIXTURE REF", ReasonCode: "fixture"}); err != nil {
 		t.Fatal(err)

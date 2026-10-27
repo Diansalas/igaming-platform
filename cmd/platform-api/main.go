@@ -28,16 +28,20 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
+	"github.com/Diansalas/igaming-platform/internal/licensingchange"
 	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
+	"github.com/Diansalas/igaming-platform/internal/residenceapproval"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
 	"github.com/Diansalas/igaming-platform/internal/staffmfa"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalpolicy"
 )
 
 func main() {
@@ -466,14 +470,37 @@ func run() error {
 	}
 
 	// ADR 0116 (A7): the AML officer service behind the AML routes. Same process issuer as the other governed writers.
-	amlService, err := aml.New(aml.Config{Pool: pool, Proofs: actorProofIssuer})
+	amlService, err := aml.New(aml.Config{Pool: pool, Proofs: actorProofIssuer, Environment: cfg.GuardEnvironment()})
 	if err != nil {
 		return fmt.Errorf("aml: %w", err)
 	}
 
+	// Migration 0181 (lic10, audit G8 / Q21): the residence determination maker-checker service. Same process issuer.
+	residenceApproval, err := residenceapproval.New(residenceapproval.Config{Pool: pool, Proofs: actorProofIssuer})
+	if err != nil {
+		return fmt.Errorf("residence approval: %w", err)
+	}
+
+	// Migration 0177 (MKT-DUAL-1): the licensing / jurisdiction change service (the only runtime writer of licences,
+	// tenants.licence_id, licence_country_ceilings, operating_country_policies and tenant_jurisdiction_configs). Same
+	// process issuer as the other governed writers.
+	licensingChanges, err := licensingchange.New(licensingchange.Config{Pool: pool, Proofs: actorProofIssuer})
+	if err != nil {
+		return fmt.Errorf("licensing changes: %w", err)
+	}
+	// lic11 (migration 0182): the withdrawal restriction policy service (the only runtime writer of
+	// withdrawal_restriction_policies). Same process issuer as the other governed writers.
+	withdrawalRestrictionPolicy, err := withdrawalpolicy.New(withdrawalpolicy.Config{Pool: pool, Proofs: actorProofIssuer})
+	if err != nil {
+		return fmt.Errorf("withdrawal restriction policy: %w", err)
+	}
+
 	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
 		LaunchAuthorisation:         launchAuthorisation,
+		LicensingChanges:            licensingChanges,
+		WithdrawalRestrictionPolicy: withdrawalRestrictionPolicy,
 		AML:                         amlService,
+		ResidenceApproval:           residenceApproval,
 		AlertRouting:                alertDispatcher,
 		PayoutInstruments:           payoutInstruments,
 		AlertRoutingProduction:      cfg.GuardEnvironment() == "production",
@@ -666,6 +693,16 @@ func run() error {
 		rg.RunEnumerationReconciliationSchedulerLoop(ctx, pool, logger, cfg.RGEnumerationSweepInterval, cfg.RGEnumerationStalledThreshold)
 	}()
 
+	// Licensing slice 1 (audit G-5, migration 0176): the READ-ONLY licence expiry / review sweep. Hourly; raises
+	// licence.expired (p1) / licence.expiring (p2) alerts with the affected tenant/brand ids. It never suspends
+	// anything (auto-suspension is a pending human decision); the runtime market-gate refusal stays the enforcement.
+	var licenceSweepWG sync.WaitGroup
+	licenceSweepWG.Add(1)
+	go func() {
+		defer licenceSweepWG.Done()
+		jurisdiction.RunLicenceSweepLoop(ctx, pool, logger, jurisdiction.LicenceSweepInterval)
+	}()
+
 	// Stage 4H-B1 Wave 3 Phase 3 (bonus-engine): the three Bonus Engine
 	// scheduled jobs ledger-accounting-model.md §7.18.2/§7.18.4 and the
 	// Grant-expiry dependency-map entry specify - each had zero live
@@ -751,6 +788,28 @@ func run() error {
 		}()
 	}
 	// ---- PRH-2 E1: KYC submission outbox worker (end) ----
+
+	// ---- lic10 (audit G1, migration 0181): automatic AML screening worker (begin) ----
+	// Drains aml_screening_requests through the screening provider. MOCK ONLY: the process-wide synthetic-component guard already
+	// refuses production while the MOCK is registered, and the worker is additionally NOT started in production; a real screening
+	// vendor and a real per-tenant subject key resolver are PROVIDER DEPENDENT. With no trigger policy configured for any tenant
+	// the queue is empty and the worker does nothing. This is trigger plumbing: it is NOT transaction monitoring (R-AML-MONITORING
+	// stays failing).
+	var amlScreeningWG sync.WaitGroup
+	if cfg.GuardEnvironment() == "production" || providers.AMLScreening == nil {
+		logger.Info("aml screening worker not started: no screening provider is permitted in this environment (PROVIDER DEPENDENT)")
+	} else {
+		amlWorker := aml.NewScreeningWorker(pool, providers.AMLScreening, aml.MockSubjectKeys{})
+		if err := amlWorker.ValidateForLoop(); err != nil {
+			return fmt.Errorf("aml screening worker wiring: %w", err)
+		}
+		amlScreeningWG.Add(1)
+		go func() {
+			defer amlScreeningWG.Done()
+			aml.RunScreeningWorkerLoop(ctx, amlWorker, logger, 10*time.Second)
+		}()
+	}
+	// ---- lic10: automatic AML screening worker (end) ----
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -842,6 +901,17 @@ func run() error {
 		logger.Error("self-exclusion enumeration reconciliation scheduler did not stop within the shutdown timeout")
 	}
 
+	licenceSweepDone := make(chan struct{})
+	go func() {
+		licenceSweepWG.Wait()
+		close(licenceSweepDone)
+	}()
+	select {
+	case <-licenceSweepDone:
+	case <-time.After(10 * time.Second):
+		logger.Error("licence expiry sweep did not stop within the shutdown timeout")
+	}
+
 	// Identical bounded-wait treatment for the three Bonus Engine
 	// scheduler loops - same reasoning as reconcilerDone/rgSweepDone above.
 	bonusSchedulersDone := make(chan struct{})
@@ -918,6 +988,19 @@ func run() error {
 		logger.Error("kyc outbox worker did not stop within the shutdown timeout")
 	}
 	// ---- PRH-2 E1: KYC outbox worker shutdown drain (end) ----
+
+	// lic10: the AML screening worker ends each request on its own bounded contexts; an item cut off mid-way is reclaimed when
+	// its lease expires, re-calling the provider with the SAME idempotency key.
+	amlScreeningDone := make(chan struct{})
+	go func() {
+		amlScreeningWG.Wait()
+		close(amlScreeningDone)
+	}()
+	select {
+	case <-amlScreeningDone:
+	case <-time.After(30 * time.Second):
+		logger.Error("aml screening worker did not stop within the shutdown timeout")
+	}
 
 	logger.Info("shutdown complete")
 	return nil

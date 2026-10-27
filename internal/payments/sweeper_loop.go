@@ -39,6 +39,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/Diansalas/igaming-platform/internal/aml"
 )
 
 // SweeperLoopDefaultInterval is ADR 0095 §7.3's RECOMMENDATION sweep tick
@@ -150,6 +152,128 @@ type SweepPassStats struct {
 	Processed int
 	Errors    int
 	Panics    int
+	// ScreeningParked / ScreeningParkedOverdue (lic26 N-9): persons whose payout is parked ONLY for an outstanding automatic AML
+	// screening, and those parked longer than the gating policy's alert threshold. Counts only, never an identifier.
+	ScreeningParked        int
+	ScreeningParkedOverdue int
+	// lic29: persons waiting for an OFFICER (counted apart from the dead-worker signal above), the persons scanned this pass, whether
+	// the keyset cycle continues next pass, and how many tenants' reads failed.
+	ScreeningParkedOfficer        int
+	ScreeningParkedOfficerOverdue int
+	ScreeningParkedScanned        int
+	ScreeningParkedPartial        bool
+	ScreeningParkedReadFailures   int
+}
+
+// sweeperParkedAlertTimeout bounds the parked-screening read and the alert raise of one tenant.
+const sweeperParkedAlertTimeout = 5 * time.Second
+
+// sweeperParkedFailAlertAfter is how many CONSECUTIVE passes the parked-screening read may fail for one tenant before an alert is
+// raised (lic29, security F-2): a monitor that can no longer see must not fail silently. ENGINEERING value.
+const sweeperParkedFailAlertAfter = 3
+
+// reportScreeningParked (lic26 N-9, lic29) is the PRODUCTION observation of the persons the automatic AML screening gate holds. It
+// runs here, in a loop that is NOT the screening worker, so a DEAD worker (which can no longer raise its own alert) is visible. One
+// pass reads ONE keyset batch (aml.ParkedScanBatch persons, in person_id order) from a per-tenant cursor, so every person is observed
+// once per cycle and a pass costs a bounded read; "partial" in the stats means the cycle continues next pass. Persons stuck for want
+// of a screening result and persons waiting for an OFFICER are counted and alerted APART (different source in the discriminator). The
+// read is its own tenant transaction; log lines and alerts carry COUNTS only (no person, account or amount: tipping-off), and a
+// failure never stops the sweep, but N consecutive failures raise aml.screening_attention (reason monitor_failing, platform-routed).
+func (s *Sweeper) reportScreeningParked(ctx context.Context, logger *slog.Logger, tenantID uuid.UUID, st *SweepPassStats) {
+	if ctx.Err() != nil {
+		return
+	}
+	s.parkedMu.Lock()
+	if s.parkedCursor == nil {
+		s.parkedCursor, s.parkedFails = map[uuid.UUID]*uuid.UUID{}, map[uuid.UUID]int{}
+	}
+	after, started := s.parkedCursor[tenantID]
+	if !started {
+		// lic30 M-2: the cursor is in memory, so a restart loses it. Start from a RANDOM point instead of the beginning: a sweeper that
+		// restarts more often than a cycle takes would otherwise only ever observe the lowest person ids. The first leg runs from the
+		// random point to the end; the next pass starts from the beginning (cursor nil), so every person is covered after one wrap.
+		r := uuid.New()
+		if s.testParkedStart != nil {
+			r = s.testParkedStart()
+		}
+		after = &r
+	}
+	s.parkedMu.Unlock()
+
+	var sc aml.ParkedScan
+	rctx, cancel := context.WithTimeout(ctx, sweeperParkedAlertTimeout)
+	err := s.guarded(func() error {
+		switch {
+		case s.testScreeningScan != nil:
+			var e error
+			sc, e = s.testScreeningScan(tenantID, after)
+			return e
+		case s.testScreeningParked != nil:
+			p, o, e := s.testScreeningParked(tenantID)
+			sc = aml.ParkedScan{Parked: p, Overdue: o}
+			return e
+		}
+		return s.Pool.WithTenant(rctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			sc, e = aml.ScreeningParkedScan(ctx, tx, tenantID, after, aml.ParkedScanBatch)
+			return e
+		})
+	})
+	cancel()
+	if err != nil {
+		recordSweeperTenantFailure(ctx, "screening_parked")
+		st.Errors++
+		st.ScreeningParkedReadFailures++
+		s.parkedMu.Lock()
+		s.parkedFails[tenantID]++
+		n := s.parkedFails[tenantID]
+		s.parkedMu.Unlock()
+		if logger != nil {
+			logger.Error("payments sweeper: screening-parked summary failed", "tenant_id", tenantID, "consecutive_failures", n)
+		}
+		if n >= sweeperParkedFailAlertAfter {
+			if aerr := aml.RaiseScreeningMonitorFailing(ctx, s.Pool, tenantID, sweeperParkedAlertTimeout); aerr != nil {
+				recordSweeperTenantFailure(ctx, "screening_parked_alert")
+				st.Errors++
+				if logger != nil {
+					logger.Error("payments sweeper: screening-monitor alert failed", "tenant_id", tenantID)
+				}
+			}
+		}
+		return
+	}
+	s.parkedMu.Lock()
+	s.parkedFails[tenantID] = 0
+	s.parkedCursor[tenantID] = sc.Next // nil: the cycle is complete, the next pass starts again from the start
+	s.parkedMu.Unlock()
+
+	st.ScreeningParked += sc.Parked
+	st.ScreeningParkedOverdue += sc.Overdue
+	st.ScreeningParkedOfficer += sc.Officer
+	st.ScreeningParkedOfficerOverdue += sc.OfficerOverdue
+	st.ScreeningParkedScanned += sc.Scanned
+	if sc.Next != nil {
+		st.ScreeningParkedPartial = true
+	}
+	if (sc.Parked > 0 || sc.Officer > 0) && logger != nil {
+		logger.Warn("payments sweeper: payouts parked for an outstanding AML screening", "tenant_id", tenantID, "parked", sc.Parked, "overdue", sc.Overdue,
+			"officer_queue", sc.Officer, "officer_overdue", sc.OfficerOverdue, "scanned", sc.Scanned, "partial", sc.Next != nil)
+	}
+	for _, a := range []struct {
+		source string
+		n      int
+	}{{"sweeper", sc.Overdue}, {"sweeper_officer", sc.OfficerOverdue}} {
+		if a.n == 0 {
+			continue
+		}
+		if aerr := aml.RaiseScreeningTrapped(ctx, s.Pool, tenantID, a.source, a.n, sweeperParkedAlertTimeout); aerr != nil {
+			recordSweeperTenantFailure(ctx, "screening_parked_alert")
+			st.Errors++
+			if logger != nil {
+				logger.Error("payments sweeper: screening-parked alert failed", "tenant_id", tenantID)
+			}
+		}
+	}
 }
 
 // sweepTenantIDs lists EVERY tenant, whatever its status: a suspended or
@@ -210,6 +334,7 @@ func (s *Sweeper) sweepTenant(ctx context.Context, logger *slog.Logger, tenantID
 	if ctx.Err() != nil {
 		return // shutdown: do not claim on a dead context (H-CR-8)
 	}
+	s.reportScreeningParked(ctx, logger, tenantID, st)
 	var ids []uuid.UUID
 	if err := s.guarded(func() error {
 		if s.testBeforeClaim != nil {
@@ -323,6 +448,14 @@ func runSweeperLoop(ctx context.Context, s *Sweeper, logger *slog.Logger, ticks 
 		}()
 		st := s.RunPass(ctx, logger, pass)
 		pass++
+		if logger != nil && (st.ScreeningParked > 0 || st.Errors > 0) {
+			// lic26 N-9: the pass summary is exported, counts only.
+			logger.Info("payments sweeper: pass", "tenants", st.Tenants, "claimed", st.Claimed, "processed", st.Processed, "errors", st.Errors,
+				"panics", st.Panics, "screening_parked", st.ScreeningParked, "screening_parked_overdue", st.ScreeningParkedOverdue,
+				"screening_officer_queue", st.ScreeningParkedOfficer, "screening_officer_overdue", st.ScreeningParkedOfficerOverdue,
+				"screening_scanned", st.ScreeningParkedScanned, "screening_partial", st.ScreeningParkedPartial,
+				"screening_read_failures", st.ScreeningParkedReadFailures)
+		}
 		if st.Listed {
 			// A pass that could not even list tenants did not sweep: leave the gauge so a stalled-sweeper rule fires (H-CR-10).
 			sweeperLastPassUnix.Store(time.Now().Unix())

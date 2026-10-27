@@ -22,20 +22,20 @@
 // canActOnTenant always allows a nil-tenant/platform-scoped caller), but
 // it closes a latent risk should this permission ever be additionally
 // granted to a tenant-scoped role.
+//
+// SINCE MIGRATION 0177 (MKT-DUAL-1) this handler no longer calls AssignTenantLicence itself: it files a licensing change
+// (internal/licensingchange) whose executor calls it. See newAssignTenantLicenceHandler.
 package httpserver
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
-	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
-	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/licensingchange"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
@@ -53,93 +53,92 @@ type assignTenantLicenceRequest struct {
 type assignTenantLicenceResponse struct {
 	TenantID  string  `json:"tenant_id"`
 	LicenceID *string `json:"licence_id"`
+	// ChangeRequestID is the executed tenant_licence_unbind licensing change (migration 0177).
+	ChangeRequestID string `json:"change_request_id,omitempty"`
 }
 
-// newAssignTenantLicenceHandler is PUT /v1/admin/tenants/{tenantID}/licence.
+// newAssignTenantLicenceHandler is PUT /v1/admin/tenants/{tenantID}/licence. Since migration 0177 (MKT-DUAL-1, audit G-2)
+// the request body is unchanged but the write is governed:
+//   - a licence id (bind / rebind, widening) files a tenant_licence_bind licensing change and answers 202 with the change
+//     request (refusals the binding would hit - unknown tenant / licence, non-active licence, licensee vs licensing_model,
+//     exclusive BYOL licence already bound - are answered now, as before); two approvals execute it;
+//   - null (unbind, narrowing: fail closed) files a tenant_licence_unbind change that executes in the SAME transaction
+//     (single actor with a reason code) and answers 200 with the previous response shape.
 func newAssignTenantLicenceHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		requestID := observability.RequestIDFromContext(r.Context())
-		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
-
-		tc, err := tenant.FromContext(r.Context())
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+		c, ok := beginLicensingCall(deps, w, r)
+		if !ok {
 			return
 		}
-		// The uuid.Nil check (beyond a bare parse failure) matters here:
-		// AssignTenantLicence's own "tenant_id is required" check runs
-		// under a platform-scoped transaction (see below) that does not
-		// itself reject a nil tenant id the way db.Pool.WithTenant used to,
-		// so this handler-level guard is what keeps a malformed path value
-		// mapped to a controlled 400 rather than a confusing downstream
-		// error.
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, c.requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
 		tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 		if err != nil || tenantID == uuid.Nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "tenantID must be a valid UUID")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "tenantID must be a valid UUID")
 			return
 		}
 		if !canActOnTenant(tc, tenantID) {
-			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot act on a different tenant")
+			apierror.Write(w, c.requestID, apierror.CodeForbidden, "cannot act on a different tenant")
 			return
 		}
 
 		var body assignTenantLicenceRequest
 		if err := decodeJSON(r, &body); err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
 		v := validation.New()
 		v.RequireNonEmpty("reason_code", body.ReasonCode)
 		if v.HasErrors() {
-			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			apierror.Write(w, c.requestID, apierror.CodeValidation, v.Error())
 			return
 		}
 
 		var licenceID *uuid.UUID
 		switch {
 		case body.LicenceID == nil:
-			apierror.Write(w, requestID, apierror.CodeValidation, "licence_id is required; send null to unassign")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "licence_id is required; send null to unassign")
 			return
 		case bytes.Equal(bytes.TrimSpace(body.LicenceID), []byte("null")):
 			licenceID = nil
 		default:
 			var raw string
 			if err := json.Unmarshal(body.LicenceID, &raw); err != nil {
-				apierror.Write(w, requestID, apierror.CodeValidation, "licence_id must be a UUID string or null")
+				apierror.Write(w, c.requestID, apierror.CodeValidation, "licence_id must be a UUID string or null")
 				return
 			}
 			parsed, err := uuid.Parse(raw)
 			if err != nil {
-				apierror.Write(w, requestID, apierror.CodeValidation, "licence_id must be a UUID string or null")
+				apierror.Write(w, c.requestID, apierror.CodeValidation, "licence_id must be a UUID string or null")
 				return
 			}
 			licenceID = &parsed
 		}
 
-		actor, err := jurisdictionActorFromRequest(r, body.ReasonCode)
+		in := licensingchange.RequestInput{ReasonCode: body.ReasonCode}
+		if licenceID == nil {
+			in.Kind = licensingchange.KindTenantLicenceUnbind
+			in.Payload, err = json.Marshal(licensingchange.TenantLicenceUnbindPayload{TenantID: tenantID})
+		} else {
+			in.Kind = licensingchange.KindTenantLicenceBind
+			in.Payload, err = json.Marshal(licensingchange.TenantLicenceBindPayload{TenantID: tenantID, LicenceID: *licenceID})
+		}
 		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
-
-		var state jurisdiction.TenantLicenceState
-		err = deps.DB.WithPlatformAdmin(r.Context(), actor.ActorID, func(ctx context.Context, tx pgx.Tx) error {
-			var err error
-			state, err = jurisdiction.AssignTenantLicence(ctx, tx, jurisdiction.AssignTenantLicenceParams{
-				TenantID: tenantID, LicenceID: licenceID, Actor: actor,
-			})
-			return err
-		})
+		res, err := c.svc.Request(r.Context(), c.actor, in)
 		if err != nil {
-			writeJurisdictionRegistryError(w, requestID, logger, "assign_tenant_licence", err)
+			writeLicensingChangeError(w, c, "assign_tenant_licence", err)
 			return
 		}
-
-		resp := assignTenantLicenceResponse{TenantID: state.TenantID.String()}
-		if state.LicenceID != nil {
-			s := state.LicenceID.String()
-			resp.LicenceID = &s
+		if res.Executed {
+			writeJSON(w, http.StatusOK, assignTenantLicenceResponse{TenantID: tenantID.String(), LicenceID: nil, ChangeRequestID: res.Request.ID.String()})
+			return
 		}
-		writeJSON(w, http.StatusOK, resp)
+		writeJSON(w, http.StatusAccepted, toLicensingChangeResponse(res, c.viewer))
 	}
 }

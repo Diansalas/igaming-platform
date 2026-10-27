@@ -19,8 +19,8 @@
 //
 // The signing capability (Issuer.Sign / Issuer.Attach) must be reached ONLY
 // from the packages that own four-eyes and the K1 capability-grant flow
-// (internal/adjustment, internal/payments, internal/capability, and since ADR 0112
-// slice 3 internal/launchgov) and from process wiring; a static test (TestStatic_OnlyFourEyesPackagesSign in
+// (internal/adjustment, internal/payments, internal/capability, since ADR 0112
+// slice 3 internal/launchgov, and since migration 0177 internal/licensingchange) and from process wiring; a static test (TestStatic_OnlyFourEyesPackagesSign in
 // actorproof_test.go) pins this. The key is
 // configuration (ACTOR_PROOF_KEYS / ACTOR_PROOF_ACTIVE_KID), never committed,
 // never stored where igaming_runtime SQL can read it.
@@ -122,6 +122,17 @@ const (
 	OpAMLCasePropose = "aml_case:propose"
 	OpAMLCaseApprove = "aml_case:approve"
 
+	// lic18 (migration 0181): authoring the automatic-screening trigger policy (can switch a withdrawal gate off: loosens a control).
+	OpAMLScreeningTriggerPolicySet = "aml_screening_trigger_policy:set"
+
+	// lic10 (migration 0181, audit G8 / owner question Q21): the residence determination maker-checker. residence_policy:set files
+	// a policy change (stricter: active at once; less strict: pending), residence_policy:approve is one of the two approvals of a
+	// less strict change, residence_determination:approve is the second Person's approval of one reviewer determination. Scope
+	// tenant only; the database function re-checks the role.
+	OpResidencePolicySet            = "residence_policy:set"
+	OpResidencePolicyApprove        = "residence_policy:approve"
+	OpResidenceDeterminationApprove = "residence_determination:approve"
+
 	// ADR 0110 T8 amendment (migration 0165): one 'reverse' decision of a governed payout reversal
 	// (withdrawal_approvals, A5). Target = the withdrawal request id; payload hash = the payout digest the
 	// decision's reason_code carries (withdrawal.PayoutReversal.Digest). Provable for scope tenant ONLY (the
@@ -140,6 +151,31 @@ const (
 	// id (payment_provider_events); payload hash = SHA-256(k2_canonical(tenant, provider, original reference, ledger
 	// idempotency key, correlation, receipt)), recomputed by the database from the inserted ledger row.
 	OpDepositReversalTombstone = "deposit_reversal_tombstone:write"
+
+	// Migration 0177 (MKT-DUAL-1, licensing / jurisdiction maker-checker): the generic licensing change primitive
+	// (internal/licensingchange). Provable for scope platform (NULL tenant on the wire) or, for request and cancel only,
+	// scope tenant; approve, reject and execute are platform scope only; never platform_acting or system.
+	OpLicensingChangeRequest = "licensing_change:request"
+	OpLicensingChangeApprove = "licensing_change:approve"
+	OpLicensingChangeReject  = "licensing_change:reject"
+	OpLicensingChangeCancel  = "licensing_change:cancel"
+	OpLicensingChangeExecute = "licensing_change:execute"
+
+	// Migration 0182 (lic11): the withdrawal restriction policy maker-checker (internal/withdrawalpolicy). Provable for scope
+	// platform (NULL tenant on the wire) ONLY; the operation set is closed in lockstep with actor_proof_require.
+	OpWithdrawalRestrictionRequest = "withdrawal_restriction_policy:request"
+	OpWithdrawalRestrictionApprove = "withdrawal_restriction_policy:approve"
+	OpWithdrawalRestrictionReject  = "withdrawal_restriction_policy:reject"
+	OpWithdrawalRestrictionCancel  = "withdrawal_restriction_policy:cancel"
+	OpWithdrawalRestrictionExecute = "withdrawal_restriction_policy:execute"
+
+	// lic19 (migration 0185, S4): the KYC enforcement policy writes (kyc_enforcement_policies). Provable for scope platform (NULL
+	// tenant) only; the operation set is closed in lockstep with actor_proof_require. Supersede is the withdrawal of an ACTIVE
+	// policy naming its successor (the successor's own activation is an activate proof).
+	OpKYCPolicyCreate    = "kyc_enforcement_policy:create"
+	OpKYCPolicyActivate  = "kyc_enforcement_policy:activate"
+	OpKYCPolicyWithdraw  = "kyc_enforcement_policy:withdraw"
+	OpKYCPolicySupersede = "kyc_enforcement_policy:supersede"
 )
 
 // The fixed system actors (the SQL verifier pins the same uuids). Unexported values behind functions (closure security
@@ -216,6 +252,12 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: launch_authorisation operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, rgConfigOperationPrefix) && !rgConfigOperationAdmitted(c.Operation, c.Scope):
 		return fmt.Errorf("%w: rg_limit_config operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
+	case strings.HasPrefix(c.Operation, licensingChangeOperationPrefix) && !licensingChangeOperationAdmitted(c.Operation, c.Scope):
+		return fmt.Errorf("%w: licensing_change operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
+	case strings.HasPrefix(c.Operation, withdrawalRestrictionOperationPrefix) && !withdrawalRestrictionOperationAdmitted(c.Operation, c.Scope):
+		return fmt.Errorf("%w: withdrawal_restriction_policy operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
+	case strings.HasPrefix(c.Operation, kycPolicyOperationPrefix) && !kycPolicyOperationAdmitted(c.Operation, c.Scope):
+		return fmt.Errorf("%w: kyc_enforcement_policy operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, staffLifecycleOperationPrefix) && !staffLifecycleOperationAdmitted(c.Operation, c.Scope):
 		return fmt.Errorf("%w: staff_lifecycle operation %q is not provable for scope %q", ErrInvalidClaims, c.Operation, c.Scope)
 	case strings.HasPrefix(c.Operation, payoutReversalOperationPrefix) && (c.Operation != OpPayoutReversalDecide || c.Scope != ScopeTenant):
@@ -237,7 +279,47 @@ func (c Claims) validate() error {
 func platformOperation(op string) bool {
 	return strings.HasPrefix(op, "capability_grant:") || strings.HasPrefix(op, "financial_policy_change:") ||
 		strings.HasPrefix(op, launchOperationPrefix) || strings.HasPrefix(op, rgConfigOperationPrefix) ||
-		strings.HasPrefix(op, staffLifecycleOperationPrefix)
+		strings.HasPrefix(op, staffLifecycleOperationPrefix) || strings.HasPrefix(op, licensingChangeOperationPrefix) ||
+		strings.HasPrefix(op, withdrawalRestrictionOperationPrefix) || strings.HasPrefix(op, kycPolicyOperationPrefix)
+}
+
+const kycPolicyOperationPrefix = "kyc_enforcement_policy:"
+
+// kycPolicyOperationAdmitted mirrors migration 0185's actor_proof_require block: the closed kyc_enforcement_policy operation
+// set, scope platform only.
+func kycPolicyOperationAdmitted(op, scope string) bool {
+	switch op {
+	case OpKYCPolicyCreate, OpKYCPolicyActivate, OpKYCPolicyWithdraw, OpKYCPolicySupersede:
+		return scope == ScopePlatform
+	}
+	return false
+}
+
+const withdrawalRestrictionOperationPrefix = "withdrawal_restriction_policy:"
+
+// withdrawalRestrictionOperationAdmitted mirrors migration 0182's actor_proof_require block: the closed
+// withdrawal_restriction_policy operation set, scope platform only.
+func withdrawalRestrictionOperationAdmitted(op, scope string) bool {
+	switch op {
+	case OpWithdrawalRestrictionRequest, OpWithdrawalRestrictionApprove, OpWithdrawalRestrictionReject,
+		OpWithdrawalRestrictionCancel, OpWithdrawalRestrictionExecute:
+		return scope == ScopePlatform
+	}
+	return false
+}
+
+const licensingChangeOperationPrefix = "licensing_change:"
+
+// licensingChangeOperationAdmitted mirrors migration 0177's actor_proof_require block: the closed licensing_change
+// operation set; request and cancel for scope platform or tenant, approve / reject / execute for scope platform only.
+func licensingChangeOperationAdmitted(op, scope string) bool {
+	switch op {
+	case OpLicensingChangeRequest, OpLicensingChangeCancel:
+		return scope == ScopePlatform || scope == ScopeTenant
+	case OpLicensingChangeApprove, OpLicensingChangeReject, OpLicensingChangeExecute:
+		return scope == ScopePlatform
+	}
+	return false
 }
 
 const staffLifecycleOperationPrefix = "staff_lifecycle:"

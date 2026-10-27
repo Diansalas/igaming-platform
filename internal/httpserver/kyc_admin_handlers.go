@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -273,6 +274,25 @@ func newReviewVerificationHandler(deps Deps) http.HandlerFunc {
 		defer func() { pendingAlerts.Flush(r.Context()) }()
 		pendingAlerts, err = alerting.InTx(r.Context(), alerting.NewTenantRunner(deps.DB, tc.TenantID), func(ctx context.Context, tx pgx.Tx) error {
 			var err error
+			// LIC10 (migration 0181, G8/Q21): the residence maker-checker policy of the tenant decides in the DATABASE (an AFTER
+			// trigger on kyc_verifications) whether this determination needs a second Person. In mode into_open_market it needs
+			// to know whether the country is served by the brand; the database cannot evaluate the operating-market ladder, so the
+			// answer is declared here, in the same transaction, as a transaction-local setting the trigger consumes and clears.
+			// With that mode in force and the setting missing the trigger REFUSES the determination (fail closed); in every other
+			// mode it is ignored. If the market cannot be evaluated the whole review fails and nothing is written.
+			if req.VerifiedResidenceCountry != nil {
+				pre, perr := kyc.GetVerificationByID(ctx, tx, verificationID)
+				if perr != nil {
+					return perr
+				}
+				servedPre, merr := marketgate.CountryServedForAny(ctx, tx, tc.TenantID, pre.BrandID, *req.VerifiedResidenceCountry)
+				if merr != nil {
+					return fmt.Errorf("review: evaluate residence market: %w", merr)
+				}
+				if _, serr := tx.Exec(ctx, `SELECT set_config('app.residence_into_open_market', $1, true)`, strconv.FormatBool(servedPre)); serr != nil {
+					return fmt.Errorf("review: declare residence market evaluation: %w", serr)
+				}
+			}
 			result, err = kyc.ReviewVerification(ctx, tx, kyc.ReviewVerificationParams{
 				VerificationID: verificationID, StaffID: staffID, NewStatus: kyc.VerificationStatus(req.Status), Reason: req.Reason,
 				VerifiedResidenceCountry: req.VerifiedResidenceCountry,

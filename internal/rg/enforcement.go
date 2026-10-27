@@ -279,7 +279,9 @@ type kindPlan struct {
 }
 
 func evaluateLimits(ctx context.Context, tx pgx.Tx, p ActionParams, dec Decision) (Decision, error) {
-	jur, err := tenantJurisdiction(ctx, tx, p.TenantID)
+	// lic25: the ONE jurisdiction whose rulebook governs this player, brand, operation and product (the KYC selection); a tenant with an
+	// approved basis whose scope cannot be resolved is an error here (ErrEvaluationUnavailable: the caller denies), never "no config".
+	jur, err := scopedSelection(ctx, tx, p)
 	if err != nil {
 		return Decision{}, err
 	}

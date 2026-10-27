@@ -93,11 +93,13 @@ func (l *Limits) CreateTimeOut(ctx context.Context, tx pgx.Tx, in TimeOutInput) 
 		return TimeOutResult{}, fmt.Errorf("rg: time-out idempotency lookup: %w", err)
 	}
 
-	jur, err := tenantJurisdiction(ctx, tx, acct.TenantID)
+	// lic25: a time-out is protective and is never blocked by a relied-on jurisdiction that has no floor: the jurisdictions that do have
+	// one narrow the durations (union), none at all means the platform defaults, exactly as for a tenant with no configuration.
+	sel, err := tenantReliance(ctx, tx, acct.TenantID)
 	if err != nil {
 		return TimeOutResult{}, err
 	}
-	cfg, err := l.compose(ctx, tx, jur, acct.TenantID, acct.BrandID, ControlTimeOut, nil)
+	cfg, err := l.compose(ctx, tx, sel, acct.TenantID, acct.BrandID, ControlTimeOut, nil)
 	if err != nil {
 		return TimeOutResult{}, err
 	}

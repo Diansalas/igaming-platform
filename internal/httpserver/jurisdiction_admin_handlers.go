@@ -16,14 +16,17 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/licensingchange"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
@@ -50,6 +53,9 @@ func writeJurisdictionRegistryError(w http.ResponseWriter, requestID string, log
 	Error(msg string, args ...any)
 }, action string, err error) {
 	switch {
+	case errors.Is(err, jurisdiction.ErrDuplicateJurisdictionCode):
+		// c1: the closed refusal code (licensingchange.ClosedRefusals) for a duplicate code; status and sentence are unchanged.
+		apierror.WriteWithCheckCodes(w, requestID, apierror.CodeValidation, err.Error(), []string{"duplicate_jurisdiction_code"})
 	case errors.Is(err, jurisdiction.ErrInvalidInput):
 		apierror.Write(w, requestID, apierror.CodeValidation, err.Error())
 	case errors.Is(err, jurisdiction.ErrNotFound):
@@ -166,6 +172,12 @@ type licenceResponse struct {
 	PermittedProducts []string `json:"permitted_products"`
 	PermittedMarkets  []string `json:"permitted_markets"`
 	CreatedAt         string   `json:"created_at"`
+	// Lifecycle fields (migration 0176); null when not recorded.
+	IssuedAt          *string `json:"issued_at"`
+	ExpiresAt         *string `json:"expires_at"`
+	ReviewDueAt       *string `json:"review_due_at"`
+	EvidenceReference *string `json:"licence_evidence_reference"`
+	UpdatedAt         string  `json:"updated_at"`
 }
 
 func toLicenceResponse(l jurisdiction.Licence) licenceResponse {
@@ -174,7 +186,24 @@ func toLicenceResponse(l jurisdiction.Licence) licenceResponse {
 		LicenceNumber: l.LicenceNumber, Status: l.Status,
 		PermittedProducts: l.PermittedProducts, PermittedMarkets: l.PermittedMarkets,
 		CreatedAt: l.CreatedAt.Format(rfc3339),
+		IssuedAt:  dateStringPtr(l.IssuedAt), ExpiresAt: dateStringPtr(l.ExpiresAt), ReviewDueAt: dateStringPtr(l.ReviewDueAt),
+		EvidenceReference: evidencePtr(l.EvidenceReference), UpdatedAt: l.UpdatedAt.Format(rfc3339),
 	}
+}
+
+func dateStringPtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.UTC().Format("2006-01-02")
+	return &s
+}
+
+func evidencePtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 type createLicenceRequest struct {
@@ -186,14 +215,19 @@ type createLicenceRequest struct {
 	ReasonCode        string   `json:"reason_code"`
 }
 
+// newCreateLicenceHandler is POST /v1/admin/licences. Since migration 0177 (MKT-DUAL-1, audit G-2) it no longer writes the
+// licence: it files a licence_create licensing change (the request body is unchanged) and answers 202 with the change
+// request. Two approvals by distinct Persons (other than the requester's) execute it through
+// POST /v1/admin/licensing-changes/{changeID}/approve; the database refuses any other runtime licences INSERT (LC040).
 func newCreateLicenceHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		requestID := observability.RequestIDFromContext(r.Context())
-		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
-
+		c, ok := beginLicensingCall(deps, w, r)
+		if !ok {
+			return
+		}
 		var body createLicenceRequest
 		if err := decodeJSON(r, &body); err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
 		v := validation.New()
@@ -202,34 +236,30 @@ func newCreateLicenceHandler(deps Deps) http.HandlerFunc {
 		v.RequireNonEmpty("licence_number", body.LicenceNumber)
 		v.RequireNonEmpty("reason_code", body.ReasonCode)
 		if v.HasErrors() {
-			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			apierror.Write(w, c.requestID, apierror.CodeValidation, v.Error())
 			return
 		}
 		jurisdictionID, err := uuid.Parse(body.JurisdictionID)
 		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "jurisdiction_id must be a valid UUID")
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "jurisdiction_id must be a valid UUID")
 			return
 		}
-		actor, err := jurisdictionActorFromRequest(r, body.ReasonCode)
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
-			return
-		}
-
-		var created jurisdiction.Licence
-		err = deps.DB.WithPlatformAdmin(r.Context(), actor.ActorID, func(ctx context.Context, tx pgx.Tx) error {
-			var err error
-			created, err = jurisdiction.CreateLicence(ctx, tx, jurisdiction.CreateLicenceParams{
-				JurisdictionID: jurisdictionID, Licensee: body.Licensee, LicenceNumber: body.LicenceNumber,
-				PermittedProducts: body.PermittedProducts, PermittedMarkets: body.PermittedMarkets, Actor: actor,
-			})
-			return err
+		payload, err := json.Marshal(licensingchange.LicenceCreatePayload{
+			JurisdictionID: jurisdictionID, Licensee: body.Licensee, LicenceNumber: body.LicenceNumber,
+			PermittedProducts: body.PermittedProducts, PermittedMarkets: body.PermittedMarkets,
 		})
 		if err != nil {
-			writeJurisdictionRegistryError(w, requestID, logger, "create_licence", err)
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
-		writeJSON(w, http.StatusCreated, toLicenceResponse(created))
+		res, err := c.svc.Request(r.Context(), c.actor, licensingchange.RequestInput{
+			Kind: licensingchange.KindLicenceCreate, Payload: payload, ReasonCode: body.ReasonCode,
+		})
+		if err != nil {
+			writeLicensingChangeError(w, c, "create_licence", err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, toLicensingChangeResponse(res, c.viewer))
 	}
 }
 
@@ -244,18 +274,26 @@ func newListLicencesHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		var list []jurisdiction.Licence
+		var bound map[uuid.UUID][]uuid.UUID
 		err = deps.DB.WithPlatformAdmin(r.Context(), actor.ActorID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			list, err = jurisdiction.ListLicences(ctx, tx)
+			if list, err = jurisdiction.ListLicences(ctx, tx); err != nil {
+				return err
+			}
+			ids := make([]uuid.UUID, 0, len(list))
+			for _, l := range list {
+				ids = append(ids, l.ID)
+			}
+			bound, err = jurisdiction.LicenceBoundTenantIDs(ctx, tx, ids)
 			return err
 		})
 		if err != nil {
 			writeJurisdictionRegistryError(w, requestID, logger, "list_licences", err)
 			return
 		}
-		resp := make([]licenceResponse, 0, len(list))
+		resp := make([]licenceDetailResponse, 0, len(list))
 		for _, l := range list {
-			resp = append(resp, toLicenceResponse(l))
+			resp = append(resp, toLicenceDetail(l, bound[l.ID]))
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}

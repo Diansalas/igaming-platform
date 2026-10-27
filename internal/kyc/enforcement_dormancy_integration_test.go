@@ -75,24 +75,10 @@ func TestListDormantJurisdictionTriggers_ActivePolicyExcludesOnlyThatTrigger(t *
 	f := seedFixture(t, pool)
 	jurisdictionID := mustLicenseTenant(t, pool, f)
 
-	var policyID uuid.UUID
-	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		policyID, err = CreateEnforcementPolicy(ctx, tx, CreateEnforcementPolicyParams{
-			LicensingJurisdictionID: jurisdictionID, TriggerType: "cumulative_deposit",
-			ThresholdMinorUnits: strPtr("100000"), AssetCode: strPtr("EUR"),
-			LegalReviewReference: "test-legal-ref", ReasonCode: "test",
-		})
-		return err
+	mustActivePolicy(t, pool, CreateEnforcementPolicyParams{
+		LicensingJurisdictionID: jurisdictionID, TriggerType: "cumulative_deposit",
+		ThresholdMinorUnits: strPtr("100000"), AssetCode: strPtr("EUR"),
 	})
-	if err != nil {
-		t.Fatalf("create cumulative_deposit policy: %v", err)
-	}
-	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		return ActivateEnforcementPolicy(ctx, tx, policyID)
-	}); err != nil {
-		t.Fatalf("activate cumulative_deposit policy: %v", err)
-	}
 
 	found := dormantKeysFor(listDormantTriggers(t, pool), jurisdictionID)
 	if found["cumulative_deposit"] {

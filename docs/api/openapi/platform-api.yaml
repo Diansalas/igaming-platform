@@ -2454,6 +2454,9 @@ paths:
         (the same body for an unknown game id, so a refused market learns nothing about the catalogue) and
         mints nothing. The RG, risk and jurisdiction-blocklist denials, provider/capability errors and the
         remaining launch behaviour are pre-existing documentation debt, not introduced by A8.
+        Licensing enforcement slice 3 (G4): before the market gate and before the wallet get-or-create, the tenant
+        and the player's brand must both be `active`; otherwise `409 TENANT_OR_BRAND_NOT_ACTIVE` (real AND demo
+        mode: a demo launch still creates a wallet and a wallet-bound session) and nothing is minted or created.
       security:
         - bearerAuth: []
       parameters:
@@ -2491,6 +2494,8 @@ paths:
           $ref: "#/components/responses/MarketNotAvailable"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: The tenant or the player's brand is not active (`TENANT_OR_BRAND_NOT_ACTIVE`); nothing was minted or created
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
@@ -3985,7 +3990,7 @@ paths:
       summary: Switch RG limit enforcement ON for this tenant or one brand (staff)
       description: >
         rg_config:write (compliance only; an APPLICATION-enforced check - the database refuses any writer that is not an active staff principal of
-        the same tenant), tenant-scoped. ONE-WAY and IRREVERSIBLE: step-up CRITICAL (403 step_up_required without a fresh step-up; security review SR6-1) because with no compliance floor it halts deposits, launches and wagers of the scope. REFUSED with 409 conflict unless the tenant's licence jurisdiction (the one enforcement reads; a tenant with none is refused, detail no_licence_jurisdiction) and every jurisdiction with a configuration in effect have a compliance floor for deposit, loss and wager in every allowed currency (the floor part of R-RG-CONFIG; the message carries the closed detail code); a repeat for an already switched-on scope is not re-checked. There is no disable operation anywhere, the table
+        the same tenant), tenant-scoped. ONE-WAY and IRREVERSIBLE: step-up CRITICAL (403 step_up_required without a fresh step-up; security review SR6-1) because with no compliance floor it halts deposits, launches and wagers of the scope. REFUSED with 409 conflict unless every jurisdiction the tenant relies on (its licence jurisdiction and the jurisdictions of its approved operating bases, lic25; a tenant that relies on none is refused, detail no_licence_jurisdiction) and every jurisdiction with a configuration in effect have a compliance floor for deposit, loss and wager in every allowed currency (the floor part of R-RG-CONFIG; the message carries the closed detail code); a repeat for an already switched-on scope is not re-checked. There is no disable operation anywhere, the table
         is append-only and holds enabling rows only; switching enforcement off is a recorded decision plus a migration. Once on, a deposit,
         a bet or a launch of the scope is subject to the player's deposit, loss and wager limits, and to `rg_config_missing` (no jurisdiction floor
         in force for the kind and asset: the action is refused) and `rg_limit_required` (a mandatory kind with no value and no numeric ceiling).
@@ -4973,6 +4978,14 @@ paths:
         §8's own recorded open decision). A rule is immutable after
         creation except for status/description/effective_until - a
         policy change is a new rule, never an edit.
+        Licensing enforcement slice 3 (G6/G7): two authoring refusals, both
+        `400` with a stable code in the message. `operation_not_evaluated`: a
+        `deposit` rule is refused because no deposit path evaluates risk rules.
+        `jurisdiction_scope_unsupported`: a rule with a `jurisdiction_code` is
+        refused for every operation, because no player-scoped jurisdiction can
+        be resolved today and every evaluator would refuse every request of the
+        operation (including every withdrawal and dispatch). Existing rows are
+        not touched.
       security:
         - bearerAuth: []
       requestBody:
@@ -6266,7 +6279,7 @@ paths:
     get:
       summary: List the platform jurisdiction registry
       description: >
-        Requires jurisdiction_registry:manage (platform_admin only).
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none.
         Platform-wide reference data with no tenant scoping - returns
         every jurisdiction row regardless of the caller's own tenant (a
         platform_admin token has none).
@@ -6334,9 +6347,11 @@ paths:
     get:
       summary: List the platform licence registry
       description: >
-        Requires jurisdiction_registry:manage (platform_admin only).
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none.
         Platform-wide reference data with no tenant scoping, ordered by
-        created_at.
+        created_at. Each licence carries `tenant_ids`, the tenants whose licence
+        binding names it (platform staff only; empty when unbound). The list is
+        not paginated (a bare array, as before).
       security:
         - bearerAuth: []
       responses:
@@ -6347,7 +6362,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/Licence"
+                  $ref: "#/components/schemas/LicenceDetail"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -6355,17 +6370,18 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
     post:
-      summary: Create a licence (platform-wide reference row, FK'd to a jurisdiction)
+      summary: File a licence creation (licence_create licensing change; MKT-DUAL-1)
       description: >
-        Requires jurisdiction_registry:manage (platform_admin only).
-        `status` always starts `active` - no status-transition endpoint
-        exists yet (a disclosed, deliberate scope limit: no current
-        consumer needs one). Not four-eyes gated. Requires reason_code,
-        recorded on an audit entry with tenant_id NULL. An unknown
-        jurisdiction_id returns 400 (jurisdiction.ErrInvalidInput wrapping
-        the foreign-key violation), never 404 - this registry's write path
-        never distinguishes "not found" from "invalid input" the way
-        AssignTenantLicence below does.
+        Requires jurisdiction_registry:manage (platform_admin only) and licensing_change:request. Since migration 0177
+        (licensing audit G-2) this route no longer writes the licence: the request body is unchanged, but it files a
+        `licence_create` licensing change and answers 202 with the change request. The licence is created only when two
+        approvals by distinct Persons (neither the requester's Person) are recorded through
+        POST /v1/admin/licensing-changes/{changeID}/approve (signed actor proof, ADR 0110); the database refuses any other
+        runtime INSERT into licences (LC040). `status` of the created licence is `active`. An unknown jurisdiction_id
+        returns 400. reason_code must be a code (1..64 characters of [A-Za-z0-9_.:-]). Step-up: critical. A licensing
+        change record is not a legal or regulatory authorisation.
+        `status` always starts `active`; status, dates, review date and evidence reference change only through the
+        lifecycle endpoints below (PUT /v1/admin/licences/{licenceID}/...).
       security:
         - bearerAuth: []
       requestBody:
@@ -6389,20 +6405,24 @@ paths:
                 reason_code: { type: string }
               required: [jurisdiction_id, licensee, licence_number, reason_code]
       responses:
-        "201":
-          description: Licence created, status=active
+        "202":
+          description: The licence_create change request was filed (status requested; nothing is created yet)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Licence"
+                $ref: "#/components/schemas/LicensingChangeResponse"
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
   /v1/admin/jurisdiction-resolution-active:
     get:
       summary: List the caller's own tenant's jurisdiction-resolution-active facts
@@ -6476,34 +6496,638 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/admin/licences/{licenceID}/status:
+    put:
+      summary: Set a licence status (regulator suspension, expiry, reinstatement)
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only; a tenant-scoped
+        token is refused 403) AND step-up `critical` (a stale second factor is
+        refused 403 step_up_required). The licence id comes from the path; no
+        tenant id is read. `reason_code` is required and recorded, with the
+        before and after state and the change kind, on one audit entry in the
+        same transaction; a licence_versions history row is written by trigger.
+        Since migration 0178 (lic4 slice 4a) the write is a licensing change and the request body is
+        unchanged. The DATABASE classifies the change against the current licence: a WIDENING change (status
+        toward `active`, a later or cleared `expires_at`, an earlier or cleared `issued_at`, a postponed or
+        cleared `review_due_at`) is filed and answers 202 with the change request; it takes effect only when
+        two approvals by distinct Persons (neither the requester's Person) are recorded through
+        POST /v1/admin/licensing-changes/{changeID}/approve. A NARROWING or neutral change (suspend, expire,
+        shorten a date, bring a review date forward, any evidence-reference change) executes in the same
+        transaction (single actor plus step-up) and answers 200; the response `change_kind` and
+        `change_request_id` say which class applied. reason_code must be a code (1..64 characters of
+        [A-Za-z0-9_.:-]). Also requires licensing_change:request. Nothing here is a legal or regulatory
+        authorisation.
+
+        The vocabulary is `active`, `suspended`, `expired` only. A regulator
+        revocation is recorded as `expired` with a reason code (a distinct
+        `revoked` status is a pending human decision). Setting the current
+        status again returns 400. A suspended or expired licence makes the
+        runtime market gate refuse registration, deposit, casino launch and
+        sportsbook wagering for every tenant bound to it, on the next request.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [active, suspended, expired] }
+                reason_code: { type: string }
+              required: [status, reason_code]
+      responses:
+        "200":
+          description: Licence changed; the response carries the classified change kind
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceChange"
+        "202":
+          description: A widening change was filed as a licensing change; nothing has changed yet (two approvals execute it)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licences/{licenceID}/validity-dates:
+    put:
+      summary: Set the licence issue and expiry dates
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only; a tenant-scoped
+        token is refused 403) AND step-up `critical` (a stale second factor is
+        refused 403 step_up_required). The licence id comes from the path; no
+        tenant id is read. `reason_code` is required and recorded, with the
+        before and after state and the change kind, on one audit entry in the
+        same transaction; a licence_versions history row is written by trigger.
+        Since migration 0178 (lic4 slice 4a) the write is a licensing change and the request body is
+        unchanged. The DATABASE classifies the change against the current licence: a WIDENING change (status
+        toward `active`, a later or cleared `expires_at`, an earlier or cleared `issued_at`, a postponed or
+        cleared `review_due_at`) is filed and answers 202 with the change request; it takes effect only when
+        two approvals by distinct Persons (neither the requester's Person) are recorded through
+        POST /v1/admin/licensing-changes/{changeID}/approve. A NARROWING or neutral change (suspend, expire,
+        shorten a date, bring a review date forward, any evidence-reference change) executes in the same
+        transaction (single actor plus step-up) and answers 200; the response `change_kind` and
+        `change_request_id` say which class applied. reason_code must be a code (1..64 characters of
+        [A-Za-z0-9_.:-]). Also requires licensing_change:request. Nothing here is a legal or regulatory
+        authorisation.
+
+        Both keys are required; `null` clears. Dates are UTC calendar dates
+        (YYYY-MM-DD). `expires_at` must be after `issued_at` when both are set.
+        The boundary is the platform predicate's (EvaluateLicenceValidity): a
+        licence is not valid on its own `expires_at` date and is valid on its
+        `issued_at` date (confirming this with compliance is a pending human
+        item).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                issued_at: { type: string, format: date, nullable: true }
+                expires_at: { type: string, format: date, nullable: true }
+                reason_code: { type: string }
+              required: [issued_at, expires_at, reason_code]
+      responses:
+        "200":
+          description: Licence changed; the response carries the classified change kind
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceChange"
+        "202":
+          description: A widening change was filed as a licensing change; nothing has changed yet (two approvals execute it)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licences/{licenceID}/review-due:
+    put:
+      summary: Set the licence review due date
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only; a tenant-scoped
+        token is refused 403) AND step-up `critical` (a stale second factor is
+        refused 403 step_up_required). The licence id comes from the path; no
+        tenant id is read. `reason_code` is required and recorded, with the
+        before and after state and the change kind, on one audit entry in the
+        same transaction; a licence_versions history row is written by trigger.
+        Since migration 0178 (lic4 slice 4a) the write is a licensing change and the request body is
+        unchanged. The DATABASE classifies the change against the current licence: a WIDENING change (status
+        toward `active`, a later or cleared `expires_at`, an earlier or cleared `issued_at`, a postponed or
+        cleared `review_due_at`) is filed and answers 202 with the change request; it takes effect only when
+        two approvals by distinct Persons (neither the requester's Person) are recorded through
+        POST /v1/admin/licensing-changes/{changeID}/approve. A NARROWING or neutral change (suspend, expire,
+        shorten a date, bring a review date forward, any evidence-reference change) executes in the same
+        transaction (single actor plus step-up) and answers 200; the response `change_kind` and
+        `change_request_id` say which class applied. reason_code must be a code (1..64 characters of
+        [A-Za-z0-9_.:-]). Also requires licensing_change:request. Nothing here is a legal or regulatory
+        authorisation.
+
+        `review_due_at` is required; `null` clears. It is read by the licence
+        expiry/review sweep (alert `licence.expiring`) and gates nothing at
+        runtime.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                review_due_at: { type: string, format: date, nullable: true }
+                reason_code: { type: string }
+              required: [review_due_at, reason_code]
+      responses:
+        "200":
+          description: Licence changed; the response carries the classified change kind
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceChange"
+        "202":
+          description: A widening change was filed as a licensing change; nothing has changed yet (two approvals execute it)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licences/{licenceID}/evidence-reference:
+    put:
+      summary: Set the opaque licence evidence reference
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only; a tenant-scoped
+        token is refused 403) AND step-up `critical` (a stale second factor is
+        refused 403 step_up_required). The licence id comes from the path; no
+        tenant id is read. `reason_code` is required and recorded, with the
+        before and after state and the change kind, on one audit entry in the
+        same transaction; a licence_versions history row is written by trigger.
+        Since migration 0178 (lic4 slice 4a) the write is a licensing change and the request body is
+        unchanged. The DATABASE classifies the change against the current licence: a WIDENING change (status
+        toward `active`, a later or cleared `expires_at`, an earlier or cleared `issued_at`, a postponed or
+        cleared `review_due_at`) is filed and answers 202 with the change request; it takes effect only when
+        two approvals by distinct Persons (neither the requester's Person) are recorded through
+        POST /v1/admin/licensing-changes/{changeID}/approve. A NARROWING or neutral change (suspend, expire,
+        shorten a date, bring a review date forward, any evidence-reference change) executes in the same
+        transaction (single actor plus step-up) and answers 200; the response `change_kind` and
+        `change_request_id` say which class applied. reason_code must be a code (1..64 characters of
+        [A-Za-z0-9_.:-]). Also requires licensing_change:request. Nothing here is a legal or regulatory
+        authorisation.
+
+        `licence_evidence_reference` is required; `null` clears. It is an opaque,
+        business-supplied reference (1..200 characters, no control characters,
+        no "@") to evidence held elsewhere. The platform never fabricates one
+        and stores no document. (The JSON key is not `evidence_reference` only
+        because a static guard reserves that literal for the payments M4
+        reference, ADR 0114 S0; the database column is `evidence_reference`.)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                licence_evidence_reference: { type: string, nullable: true, minLength: 1, maxLength: 200 }
+                reason_code: { type: string }
+              required: [licence_evidence_reference, reason_code]
+      responses:
+        "200":
+          description: Licence changed; the response carries the classified change kind
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceChange"
+        "202":
+          description: A widening change was filed as a licensing change; nothing has changed yet (two approvals execute it)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/jurisdictions/{jurisdictionID}:
+    get:
+      summary: Read one jurisdiction (jurisdiction_registry:read)
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. Platform-wide reference data.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jurisdictionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The jurisdiction
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Jurisdiction"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/licences/{licenceID}:
+    get:
+      summary: Read one licence with the tenants bound to it (jurisdiction_registry:read)
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. Lifecycle fields are null when not
+        recorded. `tenant_ids` lists the tenants whose licence binding names this licence.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The licence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceDetail"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/licence-country-ceilings:
+    get:
+      summary: List a licence's country ceiling versions (jurisdiction_registry:read)
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. Read-only: stored ceiling versions, newest
+        first within each country; this is not a market-permission decision (resolution stays in the runtime gate).
+        `licence_id` is required. `current=true` keeps only the open version of each country. Paginated with
+        ?limit= (default 50, max 200) and ?offset=. `created_by` is the authoring staff account (platform viewer).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: licence_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: country_code, in: query, required: false, schema: { type: string, pattern: "^[A-Z]{2}$" } }
+        - { name: current, in: query, required: false, schema: { type: boolean } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: A page of ceiling versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicenceCountryCeilingPage"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/operating-country-policies:
+    get:
+      summary: List a tenant's operating country policy versions (jurisdiction_registry:read)
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. Read-only: stored policy versions of
+        the tenant named by `tenant_id` (required; the platform operator's explicit target, never taken from a tenant
+        principal), all scopes, newest first. The platform session binds the target tenant for the read only
+        (the tenant read policy admits the rows; no platform read policy exists). `current=true` keeps only open
+        versions. Paginated with ?limit= (default 50, max 200) and ?offset=. This is not a market-permission decision.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenant_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: country_code, in: query, required: false, schema: { type: string, pattern: "^[A-Z]{2}$" } }
+        - { name: current, in: query, required: false, schema: { type: boolean } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: A page of policy versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatingCountryPolicyPage"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/operating-bases:
+    get:
+      summary: List a tenant's operating bases (jurisdiction_registry:read)
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. Read-only: the stored versions of the explicit
+        operating bases (platform_licence, partner_licence or no_licence_documented) of the tenant named by `tenant_id` (required;
+        the platform operator's explicit target, never taken from a tenant principal), newest first. `current=true` keeps only open
+        versions. Paginated with ?limit= (default 50, max 200) and ?offset=. A basis is a business decision recorded by named staff:
+        it is NOT a legal or regulatory authorisation and NOT a market-permission decision (the runtime gate resolves permission).
+        Bases are written only by filing a licensing change (kinds operating_basis_set, operating_basis_withdraw,
+        operating_basis_review_record). No basis ships with the platform. A tenant reads only its OWN bases, through the redacted
+        projection at GET /v1/admin/tenant/operating-bases (c2).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenant_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: country_code, in: query, required: false, schema: { type: string, pattern: "^[A-Z]{2}$" } }
+        - { name: current, in: query, required: false, schema: { type: boolean } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: A page of operating basis versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatingBasisPage"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/operating-bases/{basisID}:
+    get:
+      summary: Get one operating basis version with its decision record (jurisdiction_registry:read)
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. One stored version plus `decision`, derived from
+        the executed licensing change that created it: the requesting, executing and approving staff accounts (null for an
+        owner-path provisioning row, which the resolver does not accept as an approved basis). Not a legal position.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: basisID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The operating basis version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperatingBasisDetail"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenant/operating-bases:
+    get:
+      summary: List the caller's OWN tenant's operating bases, redacted (operating_basis:tenant_read)
+      description: >
+        Requires operating_basis:tenant_read (tenant_admin and compliance only) and a tenant-scoped token; a platform_admin token
+        (no tenant) is refused 403 and uses GET /v1/admin/operating-bases instead. Step-up none. Read-only. The tenant is ALWAYS the
+        authenticated context's: there is no tenant parameter (a supplied `tenant_id` query parameter is ignored, never honoured).
+        Row-level security independently limits the read to the caller's own rows. Returns the stored versions (open and closed,
+        active and withdrawn) newest first within country and operation; `current=true` keeps only open versions. `brand_id` filters
+        to one of the caller's brands; a brand that is unknown or belongs to another tenant is 404 (indistinguishable). Paginated
+        with ?limit= (default 50, max 200) and ?offset=. The projection is an allow-list (see TenantOperatingBasis): staff ids, the
+        decision record, change request id, reason code, determination / evidence / review references, the responsible role, the
+        restrictions note text, licence and jurisdiction ids and tenant_id are NOT returned. A basis is a recorded business
+        decision, not a legal authorisation and not a market-permission decision.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: brand_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: country_code, in: query, required: false, schema: { type: string, pattern: "^[A-Z]{2}$" } }
+        - { name: current, in: query, required: false, schema: { type: boolean } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: A page of the caller's own operating basis versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantOperatingBasisPage"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenant/operating-bases/{basisID}:
+    get:
+      summary: Get one of the caller's OWN operating basis versions, redacted (operating_basis:tenant_read)
+      description: >
+        Requires operating_basis:tenant_read (tenant_admin and compliance only) and a tenant-scoped token. Step-up none. An unknown
+        id and another tenant's id are the same 404 (no existence oracle). No decision record is returned.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: basisID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The operating basis version
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantOperatingBasis"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/jurisdiction-configs:
+    get:
+      summary: List a tenant's jurisdiction configuration versions (jurisdiction_registry:read)
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. Every version (open and closed) of the
+        tenant's tenant_jurisdiction_configs, newest first. Paginated with ?limit= (default 50, max 200) and ?offset=.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200":
+          description: A page of configuration versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantJurisdictionConfigPage"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/licences/{licenceID}/versions:
+    get:
+      summary: Read a licence's append-only change history
+      description: >
+        Requires jurisdiction_registry:read (platform_admin only). Step-up none. One row
+        per insert or change of any tracked column (status, dates, review date,
+        evidence reference, number, products, markets), oldest first, written
+        by a database trigger whoever made the change. `changed_by` is the
+        platform-admin principal of the writing session (null for a baseline
+        row) and goes through the staff-identity redaction helper.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: licenceID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The licence history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LicenceVersion"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/admin/tenants/{tenantID}/licence:
     put:
-      summary: Bind (or unassign) the licence a tenant actually operates under
+      summary: Bind (or unassign) the licence a tenant actually operates under (governed, MKT-DUAL-1)
       description: >
-        Requires tenant_licence:assign (platform_admin only). Deliberately
-        separate from tenant:write (name/slug/licensing_model
-        provisioning) and from jurisdiction_registry:manage (which only
-        creates jurisdictions/licences REFERENCE rows, never binds a live
-        tenant to one) - binding a live tenant to a licence determines
-        which jurisdiction's rules govern that tenant's operations. The
-        tenant is always taken from the path, never the body; a
-        platform_admin may target any tenant (canActOnTenant always allows
-        a nil-tenant/platform-scoped caller - a 403 here is latent today
-        since no other role holds this permission, but is enforced
-        regardless, closing a risk should that ever change).
-
-
-        `licence_id` is a three-state field, not a plain optional string:
-        the JSON key MUST be present. An absent key returns 400 ("licence_id
-        is required; send null to unassign"). A JSON `null` unassigns the
-        tenant's current licence. A UUID string assigns that licence,
-        subject to: the licence must exist and have status `active`
-        (400 otherwise), and its `licensee` must match the tenant's own
-        `licensing_model` (enforced by the database's composite foreign
-        key, surfaced here as 400). An unknown tenantID returns 404
-        (jurisdiction.ErrNotFound) - the only ErrNotFound producer in this
-        registry's write surface, unlike the 400-only jurisdictions/
-        licences creation paths above.
+        Requires tenant_licence:assign (platform_admin only) and licensing_change:request. The tenant is always taken from
+        the path, never the body. `licence_id` is a three-state field: the JSON key MUST be present (an absent key returns
+        400). Since migration 0177 (licensing audit G-2) the request body is unchanged but the write is governed:
+        a UUID (bind or rebind: widening) files a `tenant_licence_bind` licensing change and answers 202 with the change
+        request; the binding happens only when two approvals by distinct Persons (neither the requester's Person) are
+        recorded through POST /v1/admin/licensing-changes/{changeID}/approve. The refusals the binding would hit are
+        answered when filing, as before: unknown licence, a licence whose status is not `active`, a licensee that does not
+        match the tenant's `licensing_model`, or an exclusive (tenant-licensee) licence already bound to another tenant
+        return 400; an unknown tenantID returns 404. A JSON `null` (unbind: narrowing, fail closed) files a
+        `tenant_licence_unbind` change that executes in the same transaction (single actor with a reason code) and answers
+        200 with the previous response shape. Step-up: critical. Not a legal or regulatory authorisation.
       security:
         - bearerAuth: []
       parameters:
@@ -6519,11 +7143,17 @@ paths:
               $ref: "#/components/schemas/AssignTenantLicenceRequest"
       responses:
         "200":
-          description: Licence bound (or unassigned)
+          description: Licence unassigned (the tenant_licence_unbind change executed)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/TenantLicenceAssignment"
+        "202":
+          description: The tenant_licence_bind change request was filed (nothing is bound yet)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
         "400":
           $ref: "#/components/responses/ValidationError"
         "401":
@@ -6540,8 +7170,271 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+
+  # --- Licensing / jurisdiction change requests (migration 0177, MKT-DUAL-1) ---
+  #
+  # The generic two-person approval primitive for licensing and jurisdiction configuration writes. Kinds (closed):
+  # licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version,
+  # tenant_jurisdiction_config_version, and (migration 0178) licence_status_change, licence_validity_dates_change,
+  # licence_review_due_change, licence_evidence_reference_change (the licence lifecycle writes), and (migration 0180) operating_basis_set (always widening), operating_basis_withdraw (always narrowing), operating_basis_review_record (widening iff the review date moves later or needs_rereview is cleared). The DATABASE classifies each change: WIDENING (open / enable / bind / create)
+  # needs 2 approvals by distinct Persons, neither the requester's, each at most 24 h old at execution, by ACTIVE
+  # platform_admin staff (interim answer to HDR-M-1); NARROWING (close / disable / unbind / narrow) filed by a
+  # platform_admin executes in the same transaction (single actor with a reason code); narrowing filed by tenant staff
+  # needs one platform approval. Every request, approval, reject, cancel and execution carries a signed actor proof
+  # (ADR 0110). Not a legal or regulatory authorisation.
+  /v1/admin/licensing-changes:
+    post:
+      summary: File a licensing / jurisdiction change (licensing_change:request)
+      description: >
+        Requires licensing_change:request. platform_admin files any kind (plus the kind's own permission:
+        jurisdiction_registry:manage for licence_create, tenant_licence:assign for bind / unbind,
+        operating_market_ceiling:manage for licence_ceiling_version and the operating_basis_* kinds); tenant_admin and compliance file
+        operating_policy_version (compliance for the tenant rung, tenant_admin for the brand / operation rungs) and
+        compliance tenant_jurisdiction_config_version, for their OWN tenant only (another tenant's id is a 404). The
+        payload shape is per kind (see LicensingChangeCreateRequest); unknown fields are refused. A narrowing change filed
+        by a platform_admin is executed in the same call (201 with executed true). An identical open request is 409
+        LICENSING_CHANGE_DUPLICATE_PENDING. Step-up: critical. No actor-proof issuer: 500, nothing written.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LicensingChangeCreateRequest"
+      responses:
+        "201":
+          description: The change request (executed true when a single-actor narrowing change executed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: The payload names a tenant the caller cannot act on, or an unknown tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+    get:
+      summary: List licensing change requests (licensing_change:read)
+      description: >
+        Requires licensing_change:read. A platform_admin sees every request; tenant staff see the requests about their
+        own tenant only (row-level security on subject_tenant_id). A tenant caller never sees a platform actor's staff
+        id (ADR 0114 H1: null). Newest first.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [requested, approved, executed, rejected, cancelled, expired] }
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeListResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licensing-changes/{changeID}:
+    get:
+      summary: Read one licensing change request with its approvals (licensing_change:read)
+      description: >
+        Requires licensing_change:read. A tenant caller reads only requests about its own tenant; anything else is 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: Unknown request, or one the caller may not see
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licensing-changes/{changeID}/approve:
+    post:
+      summary: Approve a licensing change; the final approval executes it (licensing_change:approve)
+      description: >
+        Requires licensing_change:approve: platform_admin ONLY (interim, HDR-M-1). The requester's staff account and every
+        account of the requester's Person are refused (409 LICENSING_CHANGE_SELF_APPROVAL); a second approval by the same
+        Person is 409 LICENSING_CHANGE_ALREADY_DECIDED. When the approval is the final one required, the same transaction
+        executes the change: the database re-checks the approvals (distinct eligible Persons, at most 24 h old), expiry and
+        the classification, then the governed write runs with its own audit. Enough Persons but an approval older than the
+        window is 409 LICENSING_CHANGE_APPROVALS_STALE (nothing recorded). A domain refusal at execution (for example the
+        licence ceiling) is 409 LICENSING_CHANGE_REFUSED and nothing is recorded. Step-up: critical.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LicensingDecisionRequest"
+      responses:
+        "200":
+          description: The approval was recorded (executed true when it executed the change)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: Unknown request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licensing-changes/{changeID}/reject:
+    post:
+      summary: Reject an open licensing change (licensing_change:approve)
+      description: >
+        Requires licensing_change:approve (platform_admin ONLY). Never the requester's Person. Protective: no step-up.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LicensingDecisionRequest"
+      responses:
+        "200":
+          description: The request was rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: Unknown request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
+  /v1/admin/licensing-changes/{changeID}/cancel:
+    post:
+      summary: Cancel an open licensing change (its requester only; licensing_change:request)
+      description: >
+        Requires licensing_change:request; only the requester may cancel (403 otherwise). Protective: no step-up.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The request was cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LicensingChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/LicensingChangeForbidden"
+        "404":
+          description: Unknown request, or one the caller may not see
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/LicensingChangeConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/LicensingChangeUnavailable"
 
   # --- Jurisdiction Evidence Collection Activation (Stage 4I Phase B) ---
   #
@@ -6565,6 +7458,327 @@ paths:
   # internal/jurisdiction.Resolve, which this phase leaves entirely
   # unchanged - evidence existing (or being collectible) does not
   # activate any regulatory jurisdiction decision.
+  /v1/admin/tenants/{tenantID}/withdrawal-restriction-policy:
+    get:
+      summary: Read a tenant's effective withdrawal restriction policy (withdrawal_restriction_policy:read)
+      description: >
+        lic11 (migration 0182). Requires withdrawal_restriction_policy:read. platform_admin reads any tenant; tenant_admin
+        and compliance read their OWN tenant only (another tenant is 404). Lists every registry cause: for a configurable
+        cause (licence state) the effective action per stage (request, dispatch, redispatch) with its source
+        (configured, or default_unconfigured = the INTERIM ENGINEERING DEFAULT, the behaviour before migration 0182) and
+        the UNCONFIGURED notice when no row is configured; for a non-configurable cause (tenant / brand status: ADR 0095
+        section 44 decisions 13-18; market closed: not evaluable) its governing reference and current behaviour. Not a legal
+        or regulatory authorisation.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The effective policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyEffective"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown tenant, or one the caller may not read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/tenants/{tenantID}/withdrawal-restriction-policy/versions:
+    get:
+      summary: List a tenant's withdrawal restriction policy versions (withdrawal_restriction_policy:read)
+      description: >
+        Requires withdrawal_restriction_policy:read (a tenant reads its own). Append-only versions, newest first. A tenant
+        caller never sees a platform actor's staff id (ADR 0114 H1: null).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The versions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyVersions"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown tenant, or one the caller may not read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes:
+    post:
+      summary: File a withdrawal restriction policy change (withdrawal_restriction_policy:change)
+      description: >
+        lic11 (migration 0182). Requires withdrawal_restriction_policy:change: platform_admin ONLY (platform scope). The
+        database classifies the change: a TIGHTENING or equal change (the action is at least as strict as the effective
+        action at every stage; allow < hold_for_review < block) is single actor with a reason code and executes in the same
+        call (201 with executed true); a LOOSENING change needs two approvals by distinct Persons other than the
+        requester's. A non-configurable cause is 409 WITHDRAWAL_RESTRICTION_POLICY_NOT_CONFIGURABLE; an open change for the
+        same tenant and cause is 409 WITHDRAWAL_RESTRICTION_POLICY_DUPLICATE_PENDING. Step-up: critical. No actor-proof
+        issuer: 500, nothing written.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeCreateRequest"
+      responses:
+        "201":
+          description: The change (executed true when a single-actor change executed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+    get:
+      summary: List withdrawal restriction policy changes (withdrawal_restriction_policy:read, platform only)
+      description: >
+        Requires withdrawal_restriction_policy:read and a platform session (change requests are platform records; a tenant
+        caller is 403). Newest first.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [requested, approved, executed, rejected, cancelled, expired] }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+      responses:
+        "200":
+          description: The changes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeListResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes/{changeID}:
+    get:
+      summary: Read one withdrawal restriction policy change with its approvals (withdrawal_restriction_policy:read, platform only)
+      description: >
+        Requires withdrawal_restriction_policy:read and a platform session; anything else is 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown change, or one the caller may not see
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes/{changeID}/approve:
+    post:
+      summary: Approve a withdrawal restriction policy change; the final approval executes it (withdrawal_restriction_policy:change)
+      description: >
+        Requires withdrawal_restriction_policy:change (platform_admin ONLY). The requester's account and every account of the
+        requester's Person are refused (409 WITHDRAWAL_RESTRICTION_POLICY_SELF_APPROVAL); a second approval by the same
+        Person is 409 WITHDRAWAL_RESTRICTION_POLICY_ALREADY_DECIDED. The final approval executes the change in the same
+        transaction (the database re-checks approvals, freshness, expiry and re-classifies under the tenant lock). Step-up:
+        critical.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawalRestrictionPolicyDecisionRequest"
+      responses:
+        "200":
+          description: The approval was recorded (executed true when it executed the change)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes/{changeID}/reject:
+    post:
+      summary: Reject an open withdrawal restriction policy change (withdrawal_restriction_policy:change)
+      description: >
+        Requires withdrawal_restriction_policy:change (platform_admin ONLY). Never the requester's Person. Protective: no
+        step-up.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawalRestrictionPolicyDecisionRequest"
+      responses:
+        "200":
+          description: The change was rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
+  /v1/admin/withdrawal-restriction-policy-changes/{changeID}/cancel:
+    post:
+      summary: Cancel an open withdrawal restriction policy change (its requester only; withdrawal_restriction_policy:change)
+      description: >
+        Requires withdrawal_restriction_policy:change; only the requester may cancel (403 otherwise). Protective: no step-up.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: changeID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The change was cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalRestrictionPolicyChangeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyForbidden"
+        "404":
+          description: Unknown change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WithdrawalRestrictionPolicyUnavailable"
   /v1/admin/jurisdiction-evidence-collection:
     get:
       summary: List the caller's own tenant's evidence-collection-active facts
@@ -9665,6 +10879,451 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/enforcement-policies:
+    get:
+      summary: List KYC enforcement policies (platform-wide configuration)
+      description: >
+        kyc_enforcement_policy:read (platform_admin only; a tenant-scoped token is refused 403). lic10 (L-20). Lists the platform-wide kyc_enforcement_policies rows newest first (at most 500), optionally filtered by licensing_jurisdiction_id and status. The platform ships NO policy and NO threshold: with no active row for a jurisdiction KYC enforcement is dormant for it (ADR 0096). Responses are Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: licensing_jurisdiction_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: status, in: query, required: false, schema: { type: string, enum: [draft, active, withdrawn] } }
+      responses:
+        "200":
+          description: Policies
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/KYCEnforcementPolicy" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      summary: Author a KYC enforcement policy as a DRAFT
+      description: >
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). Creates a DRAFT only: a draft governs nothing. It becomes active only when a DIFFERENT platform administrator than the author activates it (the database trigger of migration 0100 enforces this; nothing here can bypass it). Only the evaluator-wired trigger types are accepted: `cumulative_deposit` (threshold_minor_units, a positive integer string in minor units, plus asset_code) and `play` (play_operation casino_play or sportsbook_play, nothing else); `edd_amount` and `registration_tier` are NOT IMPLEMENTED and refused. `legal_review_reference` (an opaque reference to the human legal review that supplied the value) and `reason_code` (1..64 characters of [A-Za-z0-9_.:-]) are required. Every value is supplied by the caller: the platform ships no default. Audited (kyc_enforcement_policy.created) with the reason code, IP, user agent and request id in the same transaction. 400 for a malformed or unknown value (including an unknown licensing_jurisdiction_id or asset_code). A draft may coexist with an active policy of the same key; the conflict is raised at activation.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KYCEnforcementPolicyCreateRequest" }
+      responses:
+        "201":
+          description: The draft policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KYCEnforcementPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/enforcement-policies/{policyID}/activate:
+    post:
+      summary: Activate a draft KYC enforcement policy (four-eyes)
+      description: >
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). draft to active. The acting administrator must differ from the policy's author (403, enforced by the database); a trigger type the evaluator does not consult cannot be activated (409); a second active policy for the same enforcement key is refused (409, use supersede). A policy that is not a draft is 409. Audited (kyc_enforcement_policy.activated) with the reason code and request evidence. lic19 (migration 0185, security S4): every write needs a signed actor proof (operation kyc_enforcement_policy:create / activate / withdraw / supersede, scope platform) verified and consumed by the database, and the acting administrator must be a different PERSON than the policy's author (403, KP003); an administrator or author with no Person link is refused (403, fail closed). The audit record carries the after state of the row.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: policyID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KYCEnforcementPolicyReasonRequest" }
+      responses:
+        "200":
+          description: The activated policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KYCEnforcementPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/enforcement-policies/{policyID}/withdraw:
+    post:
+      summary: Withdraw a never-activated (draft) KYC enforcement policy
+      description: >
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). draft to withdrawn only. An ACTIVE policy is never switched off without a successor (migration 0103, security F3: enforcement is not silently disabled): use supersede. A policy that is not a draft is 409. Audited (kyc_enforcement_policy.withdrawn).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: policyID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KYCEnforcementPolicyReasonRequest" }
+      responses:
+        "200":
+          description: The withdrawn policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KYCEnforcementPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/enforcement-policies/{policyID}/supersede:
+    post:
+      summary: Replace an ACTIVE KYC enforcement policy with an activated draft successor
+      description: >
+        kyc_enforcement_policy:manage (platform_admin only) AND step-up `critical`. lic10 (L-20). {policyID} is the ACTIVE policy being replaced; successor_policy_id is a DRAFT of the same enforcement key (same jurisdiction, trigger type, play operation and asset). One transaction withdraws the old policy naming the successor and activates the successor. The acting administrator must differ from BOTH policies' authors (403, enforced by the database). Responds with the successor (now active). This is the only way an active policy stops being enforced. Audited on both rows. lic19 (migration 0185, security S4): every write needs a signed actor proof (operation kyc_enforcement_policy:create / activate / withdraw / supersede, scope platform) verified and consumed by the database, and the acting administrator must be a different PERSON than the policy's author (403, KP003); an administrator or author with no Person link is refused (403, fail closed). The audit record carries the after state of the row.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: policyID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KYCEnforcementPolicySupersedeRequest" }
+      responses:
+        "200":
+          description: The successor policy (active)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/KYCEnforcementPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/tenants/{tenantID}/screening/trigger-policy:
+    get:
+      summary: Read the automatic AML screening trigger policy in force for a jurisdiction
+      description: >
+        aml:case:read (AML officer of the tenant, in-force grant re-checked by the database). lic18, migration 0181. `configured=false` means no policy: nothing triggers automatically and nothing gates a withdrawal (the platform ships NO policy). `gate_alert_after_seconds` is set iff `gate_withdrawal`. Tenant-scoped; a foreign tenant is 404. Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: jurisdiction_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The policy in force
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AMLScreeningTriggerPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      summary: Author the next version of the automatic AML screening trigger policy (tighten-only)
+      description: >
+        aml:hold:manage AND step-up `critical`; platform_acting AML officer only (the same rule as the screening policy); needs a signed actor proof (ADR 0110) bound to the whole request. lic18, migration 0181. Appends an immutable VERSION; versions are never edited. d1 (migration 0191): TIGHTEN-ONLY, enforced by the database function this route calls (against both the latest version and the version in force): a version that removes an event, switches a gate off (`gate_withdrawal` true to false), lengthens `gate_alert_after_seconds` while the gate stays on, or takes effect earlier than the version in force is refused with 409 and the closed code `trigger_policy_loosening_refused` in `check_codes`; nothing is written. Loosening the trigger policy is a governed two-Person licensing change request (kind `aml_screening_trigger_policy_loosen`), refused unless the tenant's loosening capability is configured and enabled, and it can never enable a gate. Refusals (all 4xx, nothing is written): `gate_withdrawal=true` needs the `scheduled` event (otherwise a clear goes stale unattended), a `gate_alert_after_seconds` of 60..2592000 (the threshold after which a held person raises the `aml.screening_gate_trapped` alert), a screening policy for the jurisdiction, and a screening worker that has recorded a fresh heartbeat (the production binary does not start one: a gate cannot be enabled without a running worker and provider, PROVIDER DEPENDENT). `effective_from` may not be in the past (2 minutes of clock skew allowed) nor more than 30 days ahead, so a version can neither rewrite history nor reset the grace of persons already gated (clears are counted from the FIRST gating version). The platform ships NO grace or re-screen interval; both are configuration. lic29: every refusal carries a closed code in `check_codes` (AMLScreeningRefusalCode): `screening_worker_heartbeat_missing`, `gate_environment_refused`, `gate_needs_scheduled_event`, `gate_needs_alert_threshold`, `alert_threshold_without_gate`, `effective_from_out_of_range`, `jurisdiction_not_in_scope`, `screening_policy_missing`, `tenant_not_in_jurisdiction`, `platform_officer_required`. The HTTP statuses are unchanged.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AMLScreeningTriggerPolicyRequest" }
+      responses:
+        "201":
+          description: The new version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policy_id: { type: string, format: uuid }
+                required: [policy_id]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/screening/policy:
+    get:
+      summary: Read the AML screening policy (re-screen interval, backfill grace, lists) in force for a jurisdiction
+      description: >
+        aml:case:read (AML officer of the tenant, in-force grant re-checked by the database). lic29. `configured=false` means no policy exists: the platform ships NO re-screen interval and NO grace, so nothing is defaulted. Tenant-scoped; a foreign tenant is 404. Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: jurisdiction_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The policy in force
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AMLScreeningPolicy" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      summary: Author the next version of the AML screening policy (tighten-only)
+      description: >
+        aml:hold:manage AND step-up `critical`; platform_acting AML officer only; owner-scope officer quorum; a signed actor proof (ADR 0110) bound to the whole request; a legal review reference. lic29, migration 0189. Appends an immutable VERSION. TIGHTEN-ONLY (against both the version in force and the latest): a version that removes a list, lengthens `rescreen_interval_seconds` or `backfill_grace_seconds`, or takes effect earlier than the latest version of the jurisdiction is refused with 409 and the closed code `policy_loosening_refused` in `check_codes` (this route only tightens; loosening is the governed two-person licensing change `aml_screening_policy_loosen`, c4 migration 0190, which is refused until a platform administrator configures it; SR7-3). The first version of a jurisdiction has nothing to loosen. The jurisdiction must be one the tenant is configured to operate in (`tenant_not_in_jurisdiction`). Refusals carry a closed code in `check_codes` (see AMLScreeningRefusalCode).
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AMLScreeningPolicyRequest" }
+      responses:
+        "201":
+          description: The new version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policy_id: { type: string, format: uuid }
+                required: [policy_id]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests:
+    get:
+      summary: List a person's automatic AML screening requests
+      description: >
+        aml:case:read (AML officer of the tenant). lic18, migration 0181. Newest first, at most 200. `resolved` is true when a later non-error screening result for the same person exists under the request's key. A request in `needs_officer` or `failed_terminal` that is not resolved holds the person's withdrawals until an officer resolves it. Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: personID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/AMLScreeningRequest" } }
+                required: [items]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/{requestID}/resolution:
+    post:
+      summary: Resolve a stuck automatic AML screening request (officer)
+      description: >
+        aml:hold:manage AND step-up `critical`; signed actor proof; the AML officer model applies unchanged (in-force officer grant, owner scope, quorum), re-checked by the database. lic18, migration 0181. Only a request in `needs_officer` or `failed_terminal` that is not yet resolved can be resolved; the resolution is recorded through the same governed screening record as any officer screening, under the request's own idempotency key, bound to this person and trigger. `outcome` `clear` needs the lists screened and clears the person only if no match is newer; `potential_match` and `confirmed` place a hold. A SANCTIONS-class (sanctions list) request can only be resolved by a recorded match, never by an officer clear (a clear needs a provider reference). An `error` outcome never resolves. Replays are idempotent (`replayed=true`). lic29: refusals carry a closed code in `check_codes` (AMLScreeningRefusalCode): `sanctions_clear_refused`, `sanctions_match_needs_hold`, `error_cannot_resolve`, `request_key_mismatch`, `request_not_awaiting_officer`, `key_prefix_reserved`. The HTTP statuses are unchanged.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: personID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: requestID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AMLScreeningResolutionRequest" }
+      responses:
+        "201":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result_id: { type: string, format: uuid }
+                  hold_id: { type: string, format: uuid }
+                  replayed: { type: boolean }
+                required: [result_id, replayed]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/screening/persons/{personID}/requests/replace:
+    post:
+      summary: Cancel a stale pending screening request and queue a replacement, or queue one for a person who has none (officer)
+      description: >
+        aml:hold:manage AND step-up `critical`; signed actor proof; the AML officer model applies unchanged (in-force officer grant, owner scope, quorum), re-checked by the database. lic23, migration 0181 (ledger-finance N-4). With `request_id` the request must be `pending` or `claimed` (a stale or poisoned one): it is CANCELLED (the officer, Person, reason code and the replacement id stay on the cancelled row) and a fresh request is queued for the screening worker. Without `request_id` a request is queued for a person who has none (409 when one is pending). A request stuck on a match or a terminal failure is RESOLVED, not replaced (409). 400 when no trigger policy gates withdrawals for the tenant (nothing to queue for). The replacement is screened by the worker like any request; nothing is cleared by this call. lic29: a request whose worker lease has not expired is refused (409, `request_lease_live`); closed refusal codes in `check_codes`: `request_not_replaceable`, `request_lease_live`, `person_has_pending_request`, `no_gating_policy` (AMLScreeningRefusalCode). The HTTP statuses are unchanged.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: personID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                request_id: { type: string, format: uuid }
+                reason_code: { type: string }
+              required: [reason_code]
+      responses:
+        "201":
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  new_request_id: { type: string, format: uuid }
+                  cancelled_request_id: { type: string, format: uuid }
+                required: [new_request_id]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/residence-approval-policy:
+    get:
+      summary: Read a tenant's residence determination maker-checker policy
+      description: >
+        residence_approval_policy:read (compliance and tenant_admin of the tenant; tenant-scoped sessions only, a platform token is refused 403; there is no platform_acting path). lic10, migration 0181 (audit G8, owner question Q21). `effective_mode` is the mode in force: `none` (a single reviewer's determination is market evidence at once; this is the state of every tenant until a policy is configured and is TODAY'S behaviour), `into_open_market` (a determination into a market the brand serves needs a second, distinct Person) or `all` (every determination does). `versions` is the history, newest first (at most 200). A foreign tenant is 404. Cache-Control no-store.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: The policy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResidenceApprovalPolicy" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+    post:
+      summary: File a change of a tenant's residence maker-checker mode
+      description: >
+        residence_approval_policy:manage (compliance of the tenant; tenant-scoped sessions only). Step-up none: filing only tightens or files a request that changes nothing until approved. lic10, migration 0181. The DATABASE compares `mode` with the mode in force (the caller never states the previous mode): a STRICTER mode (none, then into_open_market, then all) is active at once and answers 200 (one actor); a LESS strict mode is filed PENDING and answers 202, and takes effect only after two approvals by two distinct Persons, neither the requester's (POST .../{policyID}/approvals). The same mode as in force is 409. A pending request is only valid against the mode it was filed against: if the mode changed since, it must be refiled (409 at approval). The mode applies to FUTURE determinations; each determination snapshots the mode in force when it is made. Needs a signed actor proof (ADR 0110); `reason_code` is a code (1..64 characters of [A-Za-z0-9_.:-]). The platform ships NO policy: nothing changes for a tenant that never calls this.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResidenceApprovalPolicyRequest" }
+      responses:
+        "200":
+          description: A stricter mode, executed at once
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResidenceApprovalPolicyChange" }
+        "202":
+          description: A less strict mode, filed pending (two approvals needed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResidenceApprovalPolicyChange" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/tenants/{tenantID}/residence-approval-policy/{policyID}/approvals:
+    post:
+      summary: Approve a pending (less strict) residence maker-checker mode change
+      description: >
+        residence_approval_policy:manage AND step-up `critical`. lic10, migration 0181. Records one approval; the approval that reaches the required count (2) activates the policy in the same transaction. The requester (staff account or Person) may not approve (403 four-eyes); one Person approves once (409); an approver must be linked to a Person (403). A policy that is not pending, or whose recorded previous mode is no longer the mode in force, is 409 (refile it). Needs a signed actor proof bound to the policy id and reason.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: tenantID, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: policyID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResidenceReasonRequest" }
+      responses:
+        "200":
+          description: The approval was recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResidenceApprovalPolicyApproval" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /v1/admin/kyc/residence-determinations/pending:
+    get:
+      summary: Residence determinations waiting for a second Person
+      description: >
+        verification:read, tenant-scoped sessions only (a platform token is refused 403). lic10, migration 0181. Lists the CURRENT determinations that the tenant's policy required a second Person for and that have none, oldest first (at most 200). A pending determination is NOT market evidence. A determination replaced by a newer one is not listed. The list carries ids and times only: never the country (reading the residence value is its own permission). `determined_at` must be passed back unchanged to approve the determination.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Pending determinations
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/PendingResidenceApproval" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+  /v1/admin/kyc/verifications/{id}/residence-approval:
+    post:
+      summary: Approve one residence determination as the second Person
+      description: >
+        verification:review (compliance), tenant-scoped sessions only, AND step-up `critical`. lic10, migration 0181. Makes the determination market evidence. Bound to the exact `determined_at` listed for it: a newer determination makes the approval 404. The approver must be a different staff account AND a different, linked Person than the determiner (403 four-eyes). A determination that needs no approval, or already has one, is 409. Needs a signed actor proof. Audited as kyc.residence_determination_approved with ids only: never the country.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResidenceDeterminationApprovalRequest" }
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  verification_id: { type: string, format: uuid }
+                  status: { type: string, enum: [approved] }
+                required: [verification_id, status]
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /v1/admin/tenants/{tenantID}/staff/{staffID}/display-name:
     patch:
       summary: Set a tenant staff member's display name
@@ -11235,6 +12894,333 @@ components:
         decisions: { type: array, items: { $ref: "#/components/schemas/KYCEnforcementDecision" } }
         next_before: { type: string, description: "Omitted on an empty page. Pass it back unchanged as next_before." }
       required: [decisions]
+    KYCEnforcementPolicy:
+      type: object
+      description: One platform-wide KYC enforcement policy row (lic10, L-20).
+      properties:
+        id: { type: string, format: uuid }
+        licensing_jurisdiction_id: { type: string, format: uuid }
+        trigger_type: { type: string, enum: [cumulative_deposit, edd_amount, registration_tier, play] }
+        status: { type: string, enum: [draft, active, withdrawn] }
+        threshold_minor_units: { type: string, nullable: true, description: Positive integer in minor units of asset_code; cumulative_deposit only. }
+        asset_code: { type: string, nullable: true }
+        required_tier: { type: string, nullable: true }
+        play_operation: { type: string, nullable: true, enum: [casino_play, sportsbook_play] }
+        effective_from: { type: string, format: date-time }
+        legal_review_reference: { type: string, nullable: true }
+        reason_code: { type: string }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string, format: uuid, nullable: true, description: The authoring platform administrator (platform viewers only). }
+        successor_policy_id: { type: string, format: uuid, nullable: true, description: Set on a policy withdrawn by supersession. }
+      required: [id, licensing_jurisdiction_id, trigger_type, status, effective_from, reason_code, created_at]
+    KYCEnforcementPolicyCreateRequest:
+      type: object
+      description: Every value is supplied by the caller; the platform ships no default. Unknown fields are refused.
+      properties:
+        licensing_jurisdiction_id: { type: string, format: uuid }
+        trigger_type: { type: string, enum: [cumulative_deposit, play] }
+        threshold_minor_units: { type: string, nullable: true, description: "Positive integer string, 1..38 digits; required for cumulative_deposit, refused for play." }
+        asset_code: { type: string, nullable: true, description: Required for cumulative_deposit; must be a registered asset. }
+        play_operation: { type: string, nullable: true, enum: [casino_play, sportsbook_play], description: Required for play. }
+        legal_review_reference: { type: string, description: "1..200 characters, no surrounding space or control characters." }
+        reason_code: { type: string }
+      required: [licensing_jurisdiction_id, trigger_type, legal_review_reference, reason_code]
+    KYCEnforcementPolicyReasonRequest:
+      type: object
+      properties:
+        reason_code: { type: string }
+      required: [reason_code]
+    KYCEnforcementPolicySupersedeRequest:
+      type: object
+      properties:
+        successor_policy_id: { type: string, format: uuid }
+        reason_code: { type: string }
+      required: [successor_policy_id, reason_code]
+    AMLScreeningTriggerPolicy:
+      type: object
+      properties:
+        configured: { type: boolean }
+        events: { type: array, items: { type: string, enum: [registration, kyc_approval, scheduled] } }
+        gate_withdrawal: { type: boolean }
+        gate_alert_after_seconds: { type: integer, format: int64, nullable: true }
+        effective_from: { type: string, format: date-time, nullable: true }
+      required: [configured, events, gate_withdrawal]
+    AMLScreeningTriggerPolicyRequest:
+      type: object
+      properties:
+        jurisdiction_id: { type: string, format: uuid }
+        events: { type: array, items: { type: string, enum: [registration, kyc_approval, scheduled] } }
+        gate_withdrawal: { type: boolean }
+        gate_alert_after_seconds: { type: integer, format: int64, description: "Required (60..2592000) with gate_withdrawal, refused without it." }
+        effective_from: { type: string, format: date-time }
+        legal_review_reference: { type: string }
+        reason_code: { type: string }
+      required: [jurisdiction_id, events, gate_withdrawal, effective_from, legal_review_reference, reason_code]
+    LicensingRefusalCode:
+      type: string
+      description: >
+        c1. CLOSED, stable, machine-readable refusal code carried in `check_codes` (one element) of a refused licensing change or tenant policy
+        request, next to the generic code and the fixed sentence. The HTTP status and the generic `code` (validation_error, not_found,
+        LICENSING_CHANGE_REFUSED, LICENSING_CHANGE_GUARD_REFUSED) of every refusal are UNCHANGED from before the code existed; the code says which
+        precondition failed. It is set by the filing routes (POST /v1/admin/licensing-changes and the licence, tenant licence and lifecycle routes
+        that file through it), by approve (execution refusals) and by POST /v1/admin/jurisdictions (`duplicate_jurisdiction_code`). A malformed
+        payload is a plain validation_error without a code. Database text is never returned. The list equals licensingchange.RefusalCodes and the
+        Back Office wording table (pinned by tests). Codes: 
+        `jurisdiction_unknown`: the jurisdiction does not exist.
+        `tenant_unknown`: the tenant does not exist.
+        `licence_unknown`: the licence does not exist.
+        `licence_not_active`: a licence that is not active cannot be bound to a tenant.
+        `licence_licensee_mismatch`: the licence's licensee does not match the tenant's licensing model.
+        `licence_bound_to_other_tenant`: a licence held by a tenant is exclusively bound to one tenant, and it is bound to another.
+        `brand_not_owned`: the brand is not a brand of the tenant (a foreign brand is indistinguishable from an unknown one).
+        `tenant_without_licence_or_basis`: the tenant has no licence bound and no operating basis for the country, so no country may be enabled for it.
+        `ceiling_not_enabled_for_country`: the tenant's licence has no enabled ceiling for the country (a missing ceiling and a disabled one are the same answer).
+        `basis_clashes_with_licence_ceiling`: the tenant's own licence already has a ceiling row for the country, so a documented no-licence basis would be ambiguous.
+        `currency_not_active_asset`: every allowed currency must be an active asset of the platform asset registry.
+        `licence_status_unchanged`: the licence already has this status.
+        `licence_validity_dates_unchanged`: the validity dates are unchanged.
+        `licence_review_due_unchanged`: the review date is unchanged.
+        `licence_evidence_reference_unchanged`: the evidence reference is unchanged.
+        `duplicate_jurisdiction_code`: a jurisdiction with this code already exists.
+        `policy_exceeds_permitted_scope`: the policy would exceed the licence ceiling, a higher scope's policy, or a broader in-force policy at the same scope.
+        `policy_close_needs_successor`: closing an in-force disabled policy at an inheriting rung requires an open successor version.
+        `session_not_permitted`: this session may not request or act on licensing changes.
+        `request_invalid`: the database refused the request as invalid or naming an unknown record.
+        `request_immutable`: a filed request cannot be edited.
+        `approvals_insufficient`: the request does not hold the required number of fresh approvals by distinct eligible people.
+        `single_actor_execution_only`: a single-actor change is executed only by its requester, in its own transaction.
+        `only_requester_cancels`: only the requester may cancel a request.
+        `change_now_widens`: the change now widens what is permitted; a new request is needed.
+        `approver_not_eligible`: only an eligible platform administrator decides a request.
+        `governed_write_needs_executed_request`: governed data changes only through an executed licensing change request.
+        `licence_identity_immutable`: licence identity fields can never change.
+        `operating_basis_write_refused`: the operating basis, licence or tenant records do not allow this write.
+        `closed_basis_needs_successor`: a closed operating basis version needs a successor version that starts when it ended.
+        `records_append_only`: licensing change records are append-only.
+      enum:
+        - jurisdiction_unknown
+        - tenant_unknown
+        - licence_unknown
+        - licence_not_active
+        - licence_licensee_mismatch
+        - licence_bound_to_other_tenant
+        - brand_not_owned
+        - tenant_without_licence_or_basis
+        - ceiling_not_enabled_for_country
+        - basis_clashes_with_licence_ceiling
+        - currency_not_active_asset
+        - licence_status_unchanged
+        - licence_validity_dates_unchanged
+        - licence_review_due_unchanged
+        - licence_evidence_reference_unchanged
+        - duplicate_jurisdiction_code
+        - policy_exceeds_permitted_scope
+        - policy_close_needs_successor
+        - session_not_permitted
+        - request_invalid
+        - request_immutable
+        - approvals_insufficient
+        - single_actor_execution_only
+        - only_requester_cancels
+        - change_now_widens
+        - approver_not_eligible
+        - governed_write_needs_executed_request
+        - licence_identity_immutable
+        - operating_basis_write_refused
+        - closed_basis_needs_successor
+        - records_append_only
+    AMLScreeningRefusalCode:
+      type: string
+      description: >
+        lic29. CLOSED, stable, machine-readable refusal code carried in `check_codes` of a 400 / 409 / 403 answer of the screening routes, next to the
+        generic code and the fixed sentence (the HTTP status of every refusal is unchanged). lic30 adds `policy_effective_from_out_of_range`, `rescreen_interval_below_floor` and `rescreen_interval_below_alert_threshold`. The Back Office maps the code to its own wording; the
+        database text is never returned. Codes: 
+        `platform_officer_required`: screening configuration is authored by a platform officer.
+        `effective_from_out_of_range`: a trigger policy takes effect between now (2 minutes tolerance) and 30 days ahead.
+        `gate_needs_scheduled_event`: a withdrawal gate needs the scheduled re-screen event.
+        `gate_needs_alert_threshold`: a withdrawal gate needs gate_alert_after_seconds.
+        `screening_worker_heartbeat_missing`: no screening worker has reported in, so a withdrawal gate cannot be enabled.
+        `gate_environment_refused`: a withdrawal gate cannot be enabled where the environment anchor is production or unrecorded.
+        `alert_threshold_without_gate`: gate_alert_after_seconds belongs to a gating policy only.
+        `jurisdiction_not_in_scope`: the jurisdiction is not that of the tenant's licence or of an approved operating basis.
+        `screening_policy_missing`: set the screening policy for this jurisdiction, in effect at or before the trigger policy, first.
+        `tenant_not_in_jurisdiction`: the tenant is not configured to operate in this jurisdiction.
+        `sanctions_clear_refused`: a sanctions-class match is resolved only by recording a sanctions match, never by a clear.
+        `sanctions_match_needs_hold`: a sanctions-class match is resolved only by a sanctions match that places a hold.
+        `error_cannot_resolve`: an error result cannot resolve a match awaiting an officer.
+        `request_key_mismatch`: the request belongs to another person or trigger.
+        `request_not_awaiting_officer`: the request is not awaiting an officer.
+        `key_prefix_reserved`: the idempotency key prefix is reserved for the automatic screening queue.
+        `request_not_replaceable`: only a pending or claimed request is replaced; a match or a terminal failure is resolved.
+        `request_lease_live`: the request is being processed: its lease has not expired.
+        `person_has_pending_request`: the person has a pending request: name it to replace it.
+        `no_gating_policy`: no trigger policy gates withdrawals for this tenant, so there is nothing to queue.
+        `policy_loosening_refused`: the new screening policy version is less strict than the latest one (a list removed, a longer re-screen interval or grace, or an earlier effective time); this route only tightens, loosening is a governed licensing change request (kind `aml_screening_policy_loosen`) that is refused unless configured.
+        c4 (migration 0190), carried in `check_codes` of a LICENSING_CHANGE_GUARD_REFUSED answer of the licensing change routes (the HTTP status is unchanged):
+        `loosening_not_configured`: screening policy loosening is not configured for this tenant (the capability is off until a platform administrator configures it).
+        `loosening_disabled`: screening policy loosening is disabled for this tenant.
+        `no_screening_policy_to_loosen`: there is no screening policy version to loosen; the first version is authored through the screening policy route.
+        `not_a_loosening`: the version is not less strict than the latest one; use the screening policy route.
+        `loosening_cooling_period`: the cooling period of the loosening, counted from the filing of the request, has not elapsed.
+        `officer_grant_required`: the actor does not hold an in-force aml_officer grant on the tenant (the requester, every counted approver and the executor must).
+        `officer_quorum_not_met`: the officer quorum (at least two distinct Persons) of the tenant's owner scope is not met.
+        `sanctions_list_removal_refused`: the sanctions list is never removed through the governed loosening (a safe default; relaxing it is an owner and compliance decision).
+        `loosening_mixes_tightening`: the version tightens one dimension while loosening another; every dimension must be looser or equal.
+        `loosening_not_supported_for_tenant_licensing_model`: governed loosening is not supported for a tenant that holds its own licence (out of scope until the approver model and the quorum read are designed).
+        `grace_extension_after_expiry_refused`: the backfill grace of the withdrawal gate has expired and cannot be extended.
+        d1 (migration 0191):
+        `trigger_policy_loosening_refused`: the new trigger policy version is less strict than the latest one or the one in force (an event removed, a withdrawal gate switched off, a longer alert threshold, or an earlier effective time); the trigger policy route only tightens, loosening is a governed licensing change request (kind `aml_screening_trigger_policy_loosen`) that is refused unless configured.
+        `no_trigger_policy_to_loosen`: there is no trigger policy version to loosen; the first version is authored through the trigger policy route.
+        `trigger_gate_enable_refused`: a governed loosening never enables a withdrawal gate (a version that gates withdrawals needs the previous version to gate already).
+        The codes `policy_effective_from_out_of_range`, `rescreen_interval_below_floor`, `rescreen_interval_below_alert_threshold`, `tenant_not_in_jurisdiction` and `gate_environment_refused` are raised by the same path with the same meaning.
+      enum:
+        - policy_effective_from_out_of_range
+        - rescreen_interval_below_floor
+        - rescreen_interval_below_alert_threshold
+        - platform_officer_required
+        - effective_from_out_of_range
+        - gate_needs_scheduled_event
+        - gate_needs_alert_threshold
+        - screening_worker_heartbeat_missing
+        - gate_environment_refused
+        - alert_threshold_without_gate
+        - jurisdiction_not_in_scope
+        - screening_policy_missing
+        - tenant_not_in_jurisdiction
+        - sanctions_clear_refused
+        - sanctions_match_needs_hold
+        - error_cannot_resolve
+        - request_key_mismatch
+        - request_not_awaiting_officer
+        - key_prefix_reserved
+        - request_not_replaceable
+        - request_lease_live
+        - person_has_pending_request
+        - no_gating_policy
+        - policy_loosening_refused
+        - loosening_not_configured
+        - loosening_disabled
+        - no_screening_policy_to_loosen
+        - not_a_loosening
+        - loosening_cooling_period
+        - officer_grant_required
+        - officer_quorum_not_met
+        - sanctions_list_removal_refused
+        - loosening_mixes_tightening
+        - grace_extension_after_expiry_refused
+        - loosening_not_supported_for_tenant_licensing_model
+        - trigger_policy_loosening_refused
+        - no_trigger_policy_to_loosen
+        - trigger_gate_enable_refused
+    AMLScreeningPolicy:
+      type: object
+      description: The screening policy in force for a jurisdiction. `configured=false` means NONE exists (the platform ships no re-screen interval and no grace).
+      properties:
+        configured: { type: boolean }
+        lists: { type: array, items: { type: string, enum: [sanctions, pep] } }
+        rescreen_interval_seconds: { type: integer, format: int64, nullable: true }
+        backfill_grace_seconds: { type: integer, format: int64, nullable: true }
+        effective_from: { type: string, format: date-time, nullable: true }
+      required: [configured, lists]
+    AMLScreeningPolicyRequest:
+      type: object
+      description: "Every field is a human compliance decision. There is NO default: a missing `rescreen_interval_seconds` or `backfill_grace_seconds` is a 400 (an explicit 0 grace is a stated value)."
+      properties:
+        jurisdiction_id: { type: string, format: uuid }
+        lists: { type: array, minItems: 1, maxItems: 2, items: { type: string, enum: [sanctions, pep] } }
+        rescreen_interval_seconds: { type: integer, format: int64, minimum: 3600, maximum: 31536000, description: "lic30: an ENGINEERING safety floor of 3600 (not a legal value; below it every clear expires within the hour and all withdrawals freeze). With a withdrawal gate in the jurisdiction the interval must also be at least twice gate_alert_after_seconds (409 /400 rescreen_interval_below_alert_threshold). Refusals: rescreen_interval_below_floor." }
+        backfill_grace_seconds: { type: integer, format: int64, minimum: 0, maximum: 31536000 }
+        effective_from: { type: string, format: date-time, description: "Between now (2 minutes tolerance) and 30 days ahead (policy_effective_from_out_of_range)." }
+        legal_review_reference: { type: string }
+        reason_code: { type: string }
+      required: [jurisdiction_id, lists, rescreen_interval_seconds, backfill_grace_seconds, effective_from, legal_review_reference, reason_code]
+    AMLScreeningRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        trigger: { type: string }
+        idempotency_key: { type: string }
+        status: { type: string, enum: [pending, claimed, done, needs_officer, failed_terminal, cancelled] }
+        attempts: { type: integer }
+        outcome: { type: string }
+        match_lists: { type: array, items: { type: string } }
+        last_error_code: { type: string }
+        completed_at: { type: string, format: date-time }
+        resolved: { type: boolean }
+        created_at: { type: string, format: date-time }
+      required: [id, trigger, idempotency_key, status, attempts, resolved, created_at]
+    AMLScreeningResolutionRequest:
+      type: object
+      properties:
+        outcome: { type: string, enum: [clear, potential_match, confirmed, error] }
+        lists: { type: array, items: { type: string } }
+        match_lists: { type: array, items: { type: string } }
+        reason_code: { type: string }
+      required: [outcome, reason_code]
+    ResidenceApprovalPolicyRequest:
+      type: object
+      properties:
+        mode: { type: string, enum: [none, into_open_market, all] }
+        reason_code: { type: string }
+      required: [mode, reason_code]
+    ResidenceApprovalPolicyChange:
+      type: object
+      properties:
+        policy_id: { type: string, format: uuid }
+        status: { type: string, enum: [active, pending] }
+        required_approvals: { type: integer, description: "0 for a stricter change (active at once), 2 for a less strict one." }
+        previous_mode: { type: string, enum: [none, into_open_market, all] }
+        requested_mode: { type: string, enum: [none, into_open_market, all] }
+      required: [policy_id, status, required_approvals, previous_mode, requested_mode]
+    ResidenceReasonRequest:
+      type: object
+      properties:
+        reason_code: { type: string }
+      required: [reason_code]
+    ResidenceApprovalPolicyApproval:
+      type: object
+      properties:
+        status: { type: string, enum: [active, pending] }
+        approvals: { type: integer }
+        required_approvals: { type: integer }
+      required: [status, approvals, required_approvals]
+    ResidenceApprovalPolicy:
+      type: object
+      properties:
+        effective_mode: { type: string, enum: [none, into_open_market, all] }
+        versions:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              mode: { type: string, enum: [none, into_open_market, all] }
+              previous_mode: { type: string, enum: [none, into_open_market, all] }
+              status: { type: string, enum: [pending, active] }
+              required_approvals: { type: integer }
+              approvals: { type: integer }
+              reason_code: { type: string }
+              requested_by: { type: string, format: uuid, nullable: true }
+              requested_at: { type: string, format: date-time }
+              activated_at: { type: string, format: date-time, nullable: true }
+            required: [id, mode, previous_mode, status, required_approvals, approvals, reason_code, requested_at]
+      required: [effective_mode, versions]
+    PendingResidenceApproval:
+      type: object
+      properties:
+        verification_id: { type: string, format: uuid }
+        player_account_id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid }
+        determined_at: { type: string, format: date-time, description: Microsecond precision; pass back unchanged. }
+        determined_by: { type: string, format: uuid, nullable: true }
+        policy_mode: { type: string, enum: [into_open_market, all] }
+      required: [verification_id, player_account_id, brand_id, determined_at, policy_mode]
+    ResidenceDeterminationApprovalRequest:
+      type: object
+      properties:
+        determined_at: { type: string, format: date-time }
+        reason_code: { type: string }
+      required: [determined_at, reason_code]
     StaffDisplayNameRequest:
       type: object
       additionalProperties: false
@@ -11427,15 +13413,15 @@ components:
       type: object
       description: >
         A platform-wide `licences` registry row (migration 0002, Stage 4I
-        item B-1), FK'd to a Jurisdiction. `status` always starts `active`
-        - no status-transition endpoint exists yet (a disclosed, deliberate
-        scope limit; see registry_admin.go's own doc comment).
+        item B-1; lifecycle fields migration 0176), FK'd to a Jurisdiction.
+        `status` starts `active` and changes only through the audited
+        lifecycle endpoints. Lifecycle fields are null when not recorded.
       properties:
         id: { type: string, format: uuid }
         jurisdiction_id: { type: string, format: uuid }
         licensee: { type: string, enum: [platform, tenant] }
         licence_number: { type: string }
-        status: { type: string }
+        status: { type: string, enum: [active, suspended, expired] }
         permitted_products:
           type: array
           items: { type: string }
@@ -11443,7 +13429,221 @@ components:
           type: array
           items: { type: string }
         created_at: { type: string, format: date-time }
-      required: [id, jurisdiction_id, licensee, licence_number, status, permitted_products, permitted_markets, created_at]
+        issued_at: { type: string, format: date, nullable: true }
+        expires_at: { type: string, format: date, nullable: true }
+        review_due_at: { type: string, format: date, nullable: true }
+        licence_evidence_reference: { type: string, nullable: true }
+        updated_at: { type: string, format: date-time }
+      required: [id, jurisdiction_id, licensee, licence_number, status, permitted_products, permitted_markets, created_at,
+                 issued_at, expires_at, review_due_at, licence_evidence_reference, updated_at]
+    LicenceDetail:
+      description: A Licence plus the tenants whose licence binding names it.
+      allOf:
+        - $ref: "#/components/schemas/Licence"
+        - type: object
+          properties:
+            tenant_ids: { type: array, items: { type: string, format: uuid } }
+          required: [tenant_ids]
+    LicenceCountryCeiling:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        licence_id: { type: string, format: uuid }
+        country_code: { type: string }
+        state: { type: string, enum: [enabled, disabled] }
+        status: { type: string, enum: [active, withdrawn] }
+        authorization_reference: { type: string, nullable: true }
+        reason_code: { type: string }
+        policy_version: { type: string }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time, nullable: true }
+        created_by_actor_type: { type: string }
+        created_by: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+      required: [id, licence_id, country_code, state, status, authorization_reference, reason_code, policy_version, effective_from, effective_to, created_by_actor_type, created_by, created_at]
+    LicenceCountryCeilingPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/LicenceCountryCeiling" } }
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer }
+      required: [items, limit, offset, total]
+    OperatingCountryPolicy:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        scope: { type: string, enum: [tenant, brand, operation] }
+        brand_id: { type: string, format: uuid, nullable: true }
+        operation_code: { type: string, nullable: true }
+        product_code: { type: string, nullable: true }
+        country_code: { type: string }
+        state: { type: string, enum: [enabled, disabled] }
+        status: { type: string, enum: [active, withdrawn] }
+        authorization_reference: { type: string, nullable: true }
+        reason_code: { type: string }
+        policy_version: { type: string }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time, nullable: true }
+        created_by_actor_type: { type: string }
+        created_by: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+      required: [id, tenant_id, scope, brand_id, operation_code, product_code, country_code, state, status, authorization_reference, reason_code, policy_version, effective_from, effective_to, created_by_actor_type, created_by, created_at]
+    OperatingCountryPolicyPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/OperatingCountryPolicy" } }
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer }
+      required: [items, limit, offset, total]
+    OperatingBasis:
+      description: >
+        An explicit operating basis version (migration 0180): which basis a tenant / brand relies on for a country and operation.
+        A recorded business decision, not a legal position.
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid, nullable: true, description: "null = tenant-wide; a brand-specific row wins for that brand." }
+        country_code: { type: string }
+        operation_code: { type: string }
+        product_code: { type: string, nullable: true }
+        basis_kind: { type: string, enum: [platform_licence, partner_licence, no_licence_documented] }
+        licence_id: { type: string, format: uuid, nullable: true, description: "Required for the two licence kinds." }
+        jurisdiction_id: { type: string, format: uuid, nullable: true, description: "The jurisdiction whose regime a no_licence_documented basis relies on." }
+        determination_reference: { type: string, description: "Opaque document id of the recorded determination." }
+        determined_by_role: { type: string, description: "The responsible function, never a person's name." }
+        basis_evidence_reference: { type: string, nullable: true, description: "Opaque evidence reference of the determination (the evidence_reference column; named distinctly because no schema documents a bare evidence_reference field, ADR 0114 S0)." }
+        restrictions_note: { type: string, nullable: true }
+        restricted_product_codes: { type: array, items: { type: string } }
+        review_due_at: { type: string, format: date, nullable: true, description: "Required for no_licence_documented; the basis stops permitting the day after." }
+        needs_rereview: { type: boolean }
+        last_review_reference: { type: string, nullable: true }
+        status: { type: string, enum: [active, withdrawn] }
+        reason_code: { type: string }
+        policy_version: { type: string }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time, nullable: true }
+        change_request_id: { type: string, format: uuid, nullable: true, description: "The executed licensing change that created this version (null only for an owner-path row, never an approved basis)." }
+        created_by: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        disclaimer: { type: string }
+      required: [id, tenant_id, brand_id, country_code, operation_code, product_code, basis_kind, licence_id, jurisdiction_id,
+                 determination_reference, determined_by_role, basis_evidence_reference, restrictions_note, restricted_product_codes,
+                 review_due_at, needs_rereview, last_review_reference, status, reason_code, policy_version, effective_from,
+                 effective_to, change_request_id, created_by, created_at, disclaimer]
+    OperatingBasisDecision:
+      type: object
+      properties:
+        change_request_id: { type: string, format: uuid }
+        kind: { type: string }
+        reason_code: { type: string }
+        requested_by: { type: string, format: uuid, nullable: true }
+        executed_by: { type: string, format: uuid, nullable: true }
+        executed_at: { type: string, format: date-time, nullable: true }
+        approvals: { type: array, items: { type: object, properties: { approver_id: { type: string, format: uuid, nullable: true } }, required: [approver_id] } }
+      required: [change_request_id, kind, reason_code, requested_by, executed_by, executed_at, approvals]
+    OperatingBasisDetail:
+      allOf:
+        - $ref: "#/components/schemas/OperatingBasis"
+        - type: object
+          properties:
+            decision: { allOf: [{ $ref: "#/components/schemas/OperatingBasisDecision" }], nullable: true }
+          required: [decision]
+    OperatingBasisPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/OperatingBasis" } }
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer }
+      required: [items, limit, offset, total]
+    TenantOperatingBasis:
+      description: >
+        The tenant-visible projection of an operating basis version (c2), field by field. Returned: scope (brand_id, country_code,
+        operation_code, product_code), basis_kind, restricted_product_codes (closed registry codes), has_restrictions_note (whether
+        a note exists; the text is withheld), review_due_at, needs_rereview, status (active or withdrawn), is_current (open version),
+        policy_version, effective_from, effective_to, created_at, disclaimer. NOT returned (withheld by design, the platform marks
+        nothing in a basis row as tenant-visible): tenant_id, licence_id, jurisdiction_id, determination_reference,
+        determined_by_role, basis_evidence_reference, restrictions_note text, last_review_reference, reason_code,
+        change_request_id, created_by and any staff, requester, executor or approver identity.
+      type: object
+      additionalProperties: false
+      properties:
+        id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid, nullable: true, description: "null = tenant-wide; a brand-specific row wins for that brand." }
+        country_code: { type: string }
+        operation_code: { type: string }
+        product_code: { type: string, nullable: true }
+        basis_kind: { type: string, enum: [platform_licence, partner_licence, no_licence_documented] }
+        restricted_product_codes: { type: array, items: { type: string } }
+        has_restrictions_note: { type: boolean }
+        review_due_at: { type: string, format: date, nullable: true }
+        needs_rereview: { type: boolean }
+        status: { type: string, enum: [active, withdrawn] }
+        is_current: { type: boolean, description: "true for the open version of its scope; false for a superseded or closed version." }
+        policy_version: { type: string }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        disclaimer: { type: string }
+      required: [id, brand_id, country_code, operation_code, product_code, basis_kind, restricted_product_codes, has_restrictions_note, review_due_at, needs_rereview, status, is_current, policy_version, effective_from, effective_to, created_at, disclaimer]
+    TenantOperatingBasisPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/TenantOperatingBasis" } }
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer }
+      required: [items, limit, offset, total]
+    TenantJurisdictionConfig:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        jurisdiction_id: { type: string, format: uuid }
+        kyc_ruleset_id: { type: string, nullable: true }
+        aml_ruleset_id: { type: string, nullable: true }
+        rg_ruleset_id: { type: string, nullable: true }
+        reporting_ruleset_id: { type: string, nullable: true }
+        allowed_currencies: { type: array, items: { type: string } }
+        allowed_payment_methods: { type: array, items: { type: string } }
+        geo_block_list: { type: array, items: { type: string } }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time, nullable: true }
+      required: [id, tenant_id, jurisdiction_id, kyc_ruleset_id, aml_ruleset_id, rg_ruleset_id, reporting_ruleset_id, allowed_currencies, allowed_payment_methods, geo_block_list, effective_from, effective_to]
+    TenantJurisdictionConfigPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/TenantJurisdictionConfig" } }
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer }
+      required: [items, limit, offset, total]
+    LicenceChange:
+      type: object
+      properties:
+        licence: { $ref: "#/components/schemas/Licence" }
+        change_kind: { type: string, enum: [widening, narrowing, neutral] }
+        change_request_id: { type: string, format: uuid, description: "The executed licensing change (migration 0178). Omitted when absent." }
+      required: [licence, change_kind]
+    LicenceVersion:
+      type: object
+      properties:
+        version_no: { type: integer, minimum: 1 }
+        operation: { type: string, enum: [baseline, insert, update] }
+        changed_at: { type: string, format: date-time }
+        changed_by: { type: string, format: uuid, nullable: true }
+        change_request_id: { type: string, format: uuid, nullable: true, description: "The executed licensing change that authorised the change (migration 0179); null for a baseline row and an owner-path write." }
+        status: { type: string }
+        issued_at: { type: string, format: date, nullable: true }
+        expires_at: { type: string, format: date, nullable: true }
+        review_due_at: { type: string, format: date, nullable: true }
+        licence_evidence_reference: { type: string, nullable: true }
+        licence_number: { type: string }
+      required: [version_no, operation, changed_at, changed_by, change_request_id, status, issued_at, expires_at, review_due_at, licence_evidence_reference, licence_number]
     JurisdictionResolutionActive:
       type: object
       description: >
@@ -11479,6 +13679,288 @@ components:
           description: Required key. Omit entirely -> 400. `null` -> unassign. UUID string -> assign.
         reason_code: { type: string }
       required: [licence_id, reason_code]
+    LicensingChangeCreateRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        A licensing / jurisdiction change. `payload` is per kind, every key required, unknown keys refused:
+        licence_create {jurisdiction_id, licensee, licence_number, permitted_products, permitted_markets};
+        tenant_licence_bind {tenant_id, licence_id}; tenant_licence_unbind {tenant_id};
+        licence_ceiling_version {licence_id, country_code, state, status, authorization_reference};
+        operating_policy_version {tenant_id, scope, brand_id, operation_code, product_code, country_code, state, status,
+        authorization_reference}; tenant_jurisdiction_config_version {tenant_id, jurisdiction_id, action (set | close),
+        kyc_ruleset_id, aml_ruleset_id, rg_ruleset_id, reporting_ruleset_id, allowed_currencies, allowed_payment_methods,
+        geo_block_list} (for close every content field is null);
+        operating_basis_set {tenant_id, brand_id, country_code, operation_code, product_code, basis_kind (platform_licence | partner_licence |
+        no_licence_documented), licence_id, jurisdiction_id, determination_reference, determined_by_role, basis_evidence_reference,
+        restrictions_note, restricted_product_codes, review_due_at}; operating_basis_withdraw {tenant_id, brand_id, country_code,
+        operation_code, product_code}; operating_basis_review_record {tenant_id, brand_id, country_code, operation_code, product_code,
+        review_due_at, needs_rereview, review_reference}; (c4, migration 0190, PLATFORM ONLY, tenant staff may not request them)
+        aml_screening_policy_loosen {tenant_id, jurisdiction_id, lists (sorted, one or two of pep, sanctions), rescreen_interval_seconds,
+        backfill_grace_seconds, effective_offset_seconds (0..2592000, after execution), legal_review_reference, evidence_reference}: ALWAYS widening,
+        executes by writing the next screening policy version; refused (LICENSING_CHANGE_GUARD_REFUSED with a closed code in check_codes,
+        AMLScreeningRefusalCode) unless the tenant capability is configured and enabled, until its cooling period (from filing) has elapsed, and below the
+        engineering interval floor; aml_screening_loosening_configure {tenant_id, enabled, cooling_seconds (null when disabled), evidence_reference}:
+        widening iff it enables loosening or shortens the cooling period. No cooling period ships and loosening is OFF until a platform administrator
+        configures it. No legal value is implied by any field. (d1, migration 0191, PLATFORM ONLY) aml_screening_trigger_policy_loosen {tenant_id,
+        jurisdiction_id, events (sorted, distinct, any of kyc_approval, registration, scheduled; may be empty), gate_withdrawal, gate_alert_after_seconds
+        (60..2592000 when gate_withdrawal, else null), effective_offset_seconds (0..2592000, after execution), legal_review_reference, evidence_reference}:
+        LESSENS the screening trigger policy (an event removed, a gate switched off, a longer alert threshold while the gate stays on); ALWAYS widening
+        (two distinct platform_admin Persons, each an in-force aml_officer of the tenant, owner-scope officer quorum), gated by the SAME per-tenant
+        capability as the screening policy loosening, executes by writing the next trigger policy version, and can NEVER enable a withdrawal gate.
+      properties:
+        kind:
+          type: string
+          enum: [licence_create, tenant_licence_bind, tenant_licence_unbind, licence_ceiling_version, operating_policy_version, tenant_jurisdiction_config_version, licence_status_change, licence_validity_dates_change, licence_review_due_change, licence_evidence_reference_change, operating_basis_set, operating_basis_withdraw, operating_basis_review_record, aml_screening_policy_loosen, aml_screening_loosening_configure, aml_screening_trigger_policy_loosen]
+        payload:
+          type: object
+        reason_code:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+        note:
+          type: string
+          maxLength: 1000
+      required: [kind, payload, reason_code]
+    WithdrawalRestrictionPolicyDisclaimer:
+      type: string
+      enum:
+        - "A withdrawal restriction policy is an operator configuration recorded by named staff. It is not a legal or regulatory authorisation and does not determine what any licence or jurisdiction requires."
+    WithdrawalRestrictionPolicyStage:
+      type: object
+      properties:
+        stage: { type: string, enum: [request, dispatch, redispatch] }
+        action: { type: string, enum: [allow, hold_for_review, block] }
+        source: { type: string, enum: [configured, default_unconfigured] }
+        policy_id: { type: string, format: uuid, nullable: true }
+        set_version: { type: integer, nullable: true }
+      required: [stage, action, source, policy_id, set_version]
+    WithdrawalRestrictionPolicyCause:
+      type: object
+      properties:
+        cause: { type: string, enum: [licence_suspended, licence_expired, licence_not_yet_issued, licence_missing, tenant_suspended, tenant_closed, brand_suspended, brand_closed, market_closed] }
+        class: { type: string, enum: [licence, subject_status, market] }
+        configurable: { type: boolean }
+        evaluated: { type: boolean }
+        governing_reference: { type: string }
+        current_behaviour: { type: string }
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyStage"
+        unconfigured: { type: boolean }
+        notice: { type: string, description: "The UNCONFIGURED notice when the interim default is in force. Omitted otherwise." }
+      required: [cause, class, configurable, evaluated, governing_reference, current_behaviour, stages, unconfigured]
+    WithdrawalRestrictionPolicyEffective:
+      type: object
+      properties:
+        tenant_id: { type: string, format: uuid }
+        set_version: { type: integer, minimum: 0, description: "0 = nothing configured for the tenant" }
+        configured: { type: boolean }
+        causes:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyCause"
+        action_semantics:
+          type: array
+          description: "lic17 M-1: the plain meaning of each action (closed text). hold_for_review is a PARK, not a review queue: this policy has no per-withdrawal release."
+          items:
+            type: object
+            properties:
+              action: { type: string, enum: [allow, hold_for_review, block] }
+              meaning: { type: string }
+            required: [action, meaning]
+        parked:
+          type: object
+          description: >-
+            lic17 M-1: the tenant's open (approved / submitted) withdrawals whose latest dispatch gate decision is a WD056
+            refusal, with the earliest WD056 refusal among them. visible is false for a platform caller (the decision rows are
+            tenant-scoped): use the withdrawal.payout_gate_denied alerts with gate_code WD056 instead.
+          properties:
+            visible: { type: boolean }
+            count: { type: integer, minimum: 0 }
+            oldest_parked_since: { type: string, format: date-time, nullable: true }
+            oldest_age_seconds: { type: integer, minimum: 0, nullable: true }
+            note: { type: string }
+          required: [visible, count, oldest_parked_since, oldest_age_seconds, note]
+        disclaimer:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyDisclaimer"
+      required: [tenant_id, set_version, configured, causes, action_semantics, parked, disclaimer]
+    WithdrawalRestrictionPolicyVersion:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        cause: { type: string }
+        action: { type: string, enum: [allow, hold_for_review, block] }
+        set_version: { type: integer, minimum: 1 }
+        change_id: { type: string, format: uuid, nullable: true }
+        reason_code: { type: string }
+        created_by: { type: string, format: uuid, nullable: true, description: "Null for a tenant caller (ADR 0114 H1) and for an owner-path row." }
+        created_at: { type: string, format: date-time }
+      required: [id, cause, action, set_version, change_id, reason_code, created_by, created_at]
+    WithdrawalRestrictionPolicyVersions:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyVersion"
+        disclaimer:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyDisclaimer"
+      required: [items, disclaimer]
+    WithdrawalRestrictionPolicyChangeCreateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        tenant_id: { type: string, format: uuid }
+        cause: { type: string, enum: [licence_suspended, licence_expired, licence_not_yet_issued, licence_missing] }
+        action: { type: string, enum: [allow, hold_for_review, block] }
+        reason_code:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+        note:
+          type: string
+          maxLength: 1000
+      required: [tenant_id, cause, action, reason_code]
+    WithdrawalRestrictionPolicyDecisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason_code:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+      required: [reason_code]
+    WithdrawalRestrictionPolicyApproval:
+      type: object
+      properties:
+        approver_id: { type: string, format: uuid, nullable: true }
+        reason_code: { type: string }
+        decided_at: { type: string, format: date-time }
+      required: [approver_id, reason_code, decided_at]
+    WithdrawalRestrictionPolicyChange:
+      type: object
+      description: A withdrawal restriction policy change (append-only; content immutable; widening and required_approvals computed by the database).
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        cause: { type: string }
+        action: { type: string, enum: [allow, hold_for_review, block] }
+        reason_code: { type: string }
+        note: { type: string, nullable: true }
+        payload_hash: { type: string }
+        widening: { type: boolean }
+        required_approvals: { type: integer }
+        base_set_version: { type: integer, minimum: 0 }
+        requested_by: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [requested, approved, executed, rejected, cancelled, expired] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        decided_by: { type: string, format: uuid, nullable: true }
+        decided_at: { type: string, format: date-time, nullable: true }
+        decision_reason_code: { type: string, nullable: true }
+        executed_by: { type: string, format: uuid, nullable: true }
+        executed_at: { type: string, format: date-time, nullable: true }
+        approvals:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyApproval"
+      required: [id, tenant_id, cause, action, reason_code, payload_hash, widening, required_approvals, base_set_version, status, created_at, expires_at, approvals]
+    WithdrawalRestrictionPolicyChangeResponse:
+      type: object
+      properties:
+        change:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyChange"
+        executed: { type: boolean }
+        policy:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyVersion"
+        disclaimer:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyDisclaimer"
+      required: [change, executed, disclaimer]
+    WithdrawalRestrictionPolicyChangeListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/WithdrawalRestrictionPolicyChange"
+        disclaimer:
+          $ref: "#/components/schemas/WithdrawalRestrictionPolicyDisclaimer"
+      required: [items, disclaimer]
+    LicensingDecisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason_code:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+      required: [reason_code]
+    LicensingChangeApproval:
+      type: object
+      properties:
+        approver_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for a tenant caller (a platform approver's staff id is never shown to a tenant, ADR 0114 H1).
+        reason_code: { type: string }
+        decided_at: { type: string, format: date-time }
+      required: [approver_id, reason_code, decided_at]
+    LicensingChange:
+      type: object
+      description: >
+        A licensing change request (append-only; content immutable). `widening` and `required_approvals` are computed by
+        the database. Platform actor staff ids are null for a tenant caller (ADR 0114 H1).
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string }
+        payload: { type: object }
+        payload_hash: { type: string }
+        reason_code: { type: string }
+        note: { type: string, nullable: true }
+        widening: { type: boolean }
+        required_approvals: { type: integer }
+        subject_tenant_id: { type: string, format: uuid, nullable: true }
+        subject_licence_id: { type: string, format: uuid, nullable: true }
+        requested_by: { type: string, format: uuid, nullable: true }
+        requested_scope: { type: string, enum: [platform, tenant] }
+        status: { type: string, enum: [requested, approved, executed, rejected, cancelled, expired] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        decided_by: { type: string, format: uuid, nullable: true }
+        decided_at: { type: string, format: date-time, nullable: true }
+        decision_reason_code: { type: string, nullable: true }
+        executed_by: { type: string, format: uuid, nullable: true }
+        executed_at: { type: string, format: date-time, nullable: true }
+        approvals:
+          type: array
+          items:
+            $ref: "#/components/schemas/LicensingChangeApproval"
+      required: [id, kind, payload, payload_hash, reason_code, widening, required_approvals, requested_scope, status, created_at, expires_at, approvals]
+    LicensingChangeDisclaimer:
+      type: string
+      enum:
+        - "A licensing change record is a decision recorded by named staff. It is not a legal or regulatory authorisation and does not determine whether any licence or jurisdiction permits operation."
+    LicensingChangeResponse:
+      type: object
+      properties:
+        change_request:
+          $ref: "#/components/schemas/LicensingChange"
+        executed: { type: boolean }
+        outcome:
+          type: object
+          description: Ids of the rows the executed change wrote (present only when executed).
+        disclaimer:
+          $ref: "#/components/schemas/LicensingChangeDisclaimer"
+      required: [disclaimer, change_request, executed]
+    LicensingChangeListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LicensingChange"
+        disclaimer:
+          $ref: "#/components/schemas/LicensingChangeDisclaimer"
+      required: [disclaimer, items]
     TenantLicenceAssignment:
       type: object
       description: >
@@ -11491,6 +13973,10 @@ components:
           format: uuid
           nullable: true
           description: Null when no licence is currently assigned.
+        change_request_id:
+          type: string
+          format: uuid
+          description: The executed tenant_licence_unbind licensing change (migration 0177).
       required: [tenant_id, licence_id]
     PlayerResidence:
       type: object
@@ -13329,7 +15815,7 @@ components:
     LaunchCheck:
       type: object
       properties:
-        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-MARKET-CONFIG, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, R-RG-CONFIG (ADR 0115 S4-min: RG limit enforcement switched on with a compliance floor for every currency), or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; R-ALERTS (snapshot version 5) passes only when the alert dispatcher currently evaluates p1 and p2 routing as ready (an enabled, recipient-bearing step-0 platform route over a human-notification channel whose sink is wired and reports a person; not_evaluable without a routing source or while the evaluation is missing or stale; platform-wide routing, not per tenant); for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform" }
+        code: { type: string, description: "R-JUR-CONFIG, R-LIC-VALID, R-RULESETS, R-CURRENCIES, R-PAY-METHODS, R-CATALOGUE, R-MARKET-CONFIG, R-PROVIDER-TIER, R-ALERTS, R-PLAYER-FUNDS, R-RG-CONFIG (ADR 0115 S4-min: RG limit enforcement switched on with a compliance floor for every currency, in every jurisdiction the tenant relies on: licence plus approved operating bases, lic25; floor_missing_<kind> names the first missing kind; the interim bases_present_licence_rulebook_only note no longer exists), R-RISK-RULES-LEGACY and R-KYC-POLICY (lic7, snapshot version 6, activate/reactivate/ratify; both ACKNOWLEDGEABLE, never hard preconditions: R-RISK-RULES-LEGACY fails (jurisdiction_scoped_rules_present, deposit_rules_present, both_present) when ACTIVE stored risk rules visible to the tenant (its own or platform-wide) carry a jurisdiction_code - such a rule refuses every evaluation of its operation because no caller can supply a resolved jurisdiction - or have operation deposit - never evaluated; counts in counts, rule ids in refs; R-KYC-POLICY fails (no_licence_jurisdiction, no_active_policy) when the tenant's licensing jurisdiction has no ACTIVE KYC enforcement policy, so KYC thresholds are dormant (not_required); it passes with ok or ok_partial_operations_dormant, per-operation active policy counts in counts; no threshold value is read or defaulted), or (ADR 0116 A7, activate/reactivate/ratify) R-AML-QUORUM, R-AML-SCREENING and R-AML-MONITORING. R-AML-MONITORING is ALWAYS fail (transaction monitoring is NOT IMPLEMENTED); R-AML-SCREENING counts a MOCK provider as configured only outside production; R-ALERTS (snapshot version 5) passes only when the alert dispatcher currently evaluates p1 and p2 routing as ready (an enabled, recipient-bearing step-0 platform route over a human-notification channel whose sink is wired and reports a person; not_evaluable without a routing source or while the evaluation is missing or stale; platform-wide routing, not per tenant); for a tenant-scoped caller the provider-derived detail codes of R-AML-SCREENING are see_platform; and R-OPERATING-BASIS (lic9, snapshot version 7, activate/reactivate/ratify; ACKNOWLEDGEABLE, never a hard precondition, informational only: it is not a legal position and not a market decision) which reports, for the subject, how many countries with an enabled tenant-rung policy are governed by an EXPLICIT approved operating basis for registration, deposit and casino wagering (counts operating_basis_*) and whether any recorded basis review is overdue (review_overdue: the review date has passed or a re-review is required) or due within 30 days (review_due_soon); ok_some_via_licence_chain means at least one enabled country resolves through the tenant's own licence ceiling, the pre-lic9 model, and is not a failure; no_enabled_country means nothing to report" }
         result: { type: string, enum: [pass, fail, not_evaluable], description: "not_evaluable is not pass" }
         detail_code: { type: string, description: "A closed detail code, never free text." }
       required: [code, result, detail_code]
@@ -13337,7 +15823,7 @@ components:
       type: object
       description: >
         The server-side informational readiness of a subject for an action. It proves configuration presence only. counts and balances are live display data of
-        R-PLAYER-FUNDS (not hashed); balances are DECIMAL STRINGS per asset. notices are fixed texts: closure shows the stranded-funds notice, a suspension shows the
+        R-PLAYER-FUNDS, R-RISK-RULES-LEGACY, R-KYC-POLICY and R-OPERATING-BASIS (not hashed); refs are rule ids (ids only) behind R-RISK-RULES-LEGACY and basis ids (ids only) behind R-OPERATING-BASIS (never shown to a tenant-scoped caller); balances are DECIMAL STRINGS per asset. notices are fixed texts: closure shows the stranded-funds notice, a suspension shows the
         inaccessible-not-stranded notice.
       properties:
         version: { type: integer }
@@ -13347,6 +15833,7 @@ components:
         readiness_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: "Pass back as seen_readiness_hash to approve." }
         non_passing_check_codes: { type: array, items: { type: string }, description: "Exactly the set a request must acknowledge." }
         counts: { type: object, additionalProperties: { type: integer, format: int64 } }
+        refs: { type: object, additionalProperties: { type: array, maxItems: 50, items: { type: string, format: uuid } }, description: "Rule ids (R-RISK-RULES-LEGACY) and operating basis ids (R-OPERATING-BASIS: operating_basis_review_overdue, operating_basis_review_due_soon), ids only, at most 50 per key; the full count is in counts. Omitted for a tenant-scoped caller." }
         balances: { type: object, additionalProperties: { type: string, pattern: "^-?[0-9]+$" } }
         notices: { type: array, items: { type: string } }
       required: [version, computed_at, environment, checks, readiness_hash, non_passing_check_codes]
@@ -13781,6 +16268,28 @@ components:
             - RG_IDENTITY_REVIEW
             - RG_PROOF_REFUSED
             - RG_UNAVAILABLE
+            - LICENSING_CHANGE_SELF_APPROVAL
+            - LICENSING_CHANGE_NOT_PENDING
+            - LICENSING_CHANGE_ALREADY_DECIDED
+            - LICENSING_CHANGE_DUPLICATE_PENDING
+            - LICENSING_CHANGE_APPROVALS_STALE
+            - LICENSING_CHANGE_REFUSED
+            - LICENSING_CHANGE_GUARD_REFUSED
+            - LICENSING_CHANGE_RETRYABLE_LOCK_TIMEOUT
+            - LICENSING_CHANGE_PROOF_REFUSED
+            - LICENSING_CHANGE_NO_PERSON
+            - LICENSING_CHANGE_UNAVAILABLE
+            - WITHDRAWAL_RESTRICTION_POLICY_SELF_APPROVAL
+            - WITHDRAWAL_RESTRICTION_POLICY_NOT_PENDING
+            - WITHDRAWAL_RESTRICTION_POLICY_ALREADY_DECIDED
+            - WITHDRAWAL_RESTRICTION_POLICY_DUPLICATE_PENDING
+            - WITHDRAWAL_RESTRICTION_POLICY_APPROVALS_STALE
+            - WITHDRAWAL_RESTRICTION_POLICY_NOT_CONFIGURABLE
+            - WITHDRAWAL_RESTRICTION_POLICY_GUARD_REFUSED
+            - WITHDRAWAL_RESTRICTION_POLICY_RETRYABLE_LOCK_TIMEOUT
+            - WITHDRAWAL_RESTRICTION_POLICY_PROOF_REFUSED
+            - WITHDRAWAL_RESTRICTION_POLICY_NO_PERSON
+            - WITHDRAWAL_RESTRICTION_POLICY_UNAVAILABLE
             - mfa_enrolment_required
             - mfa_locked
             - invalid_mfa_code
@@ -13810,6 +16319,9 @@ components:
           description: >
             Set only by the launch authorisation routes: the closed H-n / R- / refusal / SQLSTATE codes of a refused precondition,
             acknowledgement, execution or database guard. Never free text.
+            lic29: the AML screening routes also use it for the closed refusal codes (AMLScreeningRefusalCode) and the generic AML
+            check codes (quorum_not_met, hold_refused, four_eyes_refused, stale, illegal_transition, guard_refused, note_refused)
+            c1: the licensing change and tenant policy routes use it for one closed refusal code (LicensingRefusalCode), the status and generic code unchanged.
           items:
             type: string
       required: [code, message]
@@ -13942,6 +16454,20 @@ components:
         ceiling: { type: string, nullable: true, description: "NUMERIC(38,0) minor units, a decimal string; null = none" }
         scope: { type: string, enum: [account, tenant_person] }
         increase_cooldown_seconds: { type: integer, format: int64, nullable: true }
+        unavailable_reason:
+          type: string
+          enum: [missing_floor, calendar_conflict]
+          description: >
+            lic27a. Present when a jurisdiction the tenant relies on has no floor for this kind (missing_floor) or relied-on jurisdictions disagree on
+            calendar_tz / week_start (calendar_conflict). config_in_force is false, allowed_periods is empty and no ceiling is offered: do not offer limit
+            setting for this kind except as protective_only. For missing_floor the server REFUSES increases, removals and confirms. For calendar_conflict the UI offers none of them and
+            play / the account usage read fail closed, but the server does NOT refuse an increase, removal or confirm on the write path (whether it should is an open owner decision). time_out_hours and self_exclusion_days are always returned.
+        protective_only:
+          type: boolean
+          description: >
+            lic28. With unavailable_reason: allowed_periods lists only the periods of the relied-on jurisdictions that have a floor; they may be used for a
+            FIRST limit or a LOWER value (always accepted by the server). No ceiling or cooldown is offered; an increase or removal is refused by the server for missing_floor and merely not offered for calendar_conflict.
+            Note: a calendar_conflict makes the account-level usage read of that kind fail closed (it never weakens protection); money-path enforcement uses one jurisdiction per scope and is not affected.
       required: [kind, config_in_force, mandatory, allowed_periods, ceiling, increase_cooldown_seconds]
     RGOptions:
       type: object
@@ -14513,6 +17039,65 @@ components:
         sportsbook bets) refuse a closure and leave the request pending; LAUNCH_RETRYABLE_LOCK_TIMEOUT is retryable (nothing was recorded); LAUNCH_REFUSED_AT_EXECUTION (the approval is recorded,
         execution was refused; check_codes carries the refusal code); LAUNCH_GUARD_REFUSED (another database guard; check_codes carries the LA code). The message is a fixed sentence; no
         message states a legal conclusion.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WithdrawalRestrictionPolicyUnavailable:
+      description: 503 WITHDRAWAL_RESTRICTION_POLICY_UNAVAILABLE. The withdrawal restriction policy service is not wired in this process; nothing was read or written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WithdrawalRestrictionPolicyForbidden:
+      description: >
+        403. FORBIDDEN (the caller's role lacks the static permission, a tenant session asked for a write or a change
+        request, or a non-requester cancelling), WITHDRAWAL_RESTRICTION_POLICY_PROOF_REFUSED (the ADR 0110 actor proof guard,
+        AP0xx), or WITHDRAWAL_RESTRICTION_POLICY_NO_PERSON (the staff account has no readable Person: four-eyes cannot be
+        evaluated, fail closed).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WithdrawalRestrictionPolicyConflict:
+      description: >
+        409. WITHDRAWAL_RESTRICTION_POLICY_SELF_APPROVAL (the requester or another account of the requester's Person),
+        WITHDRAWAL_RESTRICTION_POLICY_NOT_PENDING (decided, executed, cancelled or expired),
+        WITHDRAWAL_RESTRICTION_POLICY_ALREADY_DECIDED (this Person already approved),
+        WITHDRAWAL_RESTRICTION_POLICY_DUPLICATE_PENDING (an open change for the tenant and cause),
+        WITHDRAWAL_RESTRICTION_POLICY_APPROVALS_STALE (an approval older than the 24 h window),
+        WITHDRAWAL_RESTRICTION_POLICY_NOT_CONFIGURABLE (an owner-decided or non-evaluable cause),
+        WITHDRAWAL_RESTRICTION_POLICY_GUARD_REFUSED (a database guard WR0xx / LC0xx),
+        WITHDRAWAL_RESTRICTION_POLICY_RETRYABLE_LOCK_TIMEOUT (retry). Nothing is recorded.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LicensingChangeUnavailable:
+      description: 503 LICENSING_CHANGE_UNAVAILABLE. The licensing change service is not wired in this process; nothing was read or written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LicensingChangeForbidden:
+      description: >
+        403. FORBIDDEN (the caller's role lacks the static or the kind's permission, a tenant session asked for a
+        platform-only kind, an acting session, or a non-requester cancelling), LICENSING_CHANGE_PROOF_REFUSED (the ADR 0110
+        actor proof guard, AP0xx), or LICENSING_CHANGE_NO_PERSON (the staff account has no readable Person: four-eyes
+        cannot be evaluated, fail closed).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LicensingChangeConflict:
+      description: >
+        409. LICENSING_CHANGE_SELF_APPROVAL (the requester or another account of the requester's Person),
+        LICENSING_CHANGE_NOT_PENDING (decided, executed, cancelled or expired), LICENSING_CHANGE_ALREADY_DECIDED (this
+        Person already approved), LICENSING_CHANGE_DUPLICATE_PENDING (an identical open request), LICENSING_CHANGE_APPROVALS_STALE
+        (an approval older than the 24 h window), LICENSING_CHANGE_REFUSED (the domain writer refused, for example the
+        licence ceiling), LICENSING_CHANGE_GUARD_REFUSED (a database guard LC0xx), LICENSING_CHANGE_RETRYABLE_LOCK_TIMEOUT
+        (retry). c1: LICENSING_CHANGE_REFUSED and LICENSING_CHANGE_GUARD_REFUSED carry one closed code in `check_codes`
+        (LicensingRefusalCode) when the refusal is one the platform names. Nothing is recorded.
       content:
         application/json:
           schema:

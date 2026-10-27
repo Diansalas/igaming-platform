@@ -935,7 +935,7 @@ func TestEvaluateEnforcement_DepositDormantByDefault(t *testing.T) {
 
 func TestMigration0100_CheckConstraints_TriggerTypeShapes(t *testing.T) {
 	pool := testPool(t)
-	principal := uuid.New()
+	principal := polAdmin(t, pool)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
 
 	cases := []struct {
@@ -961,12 +961,8 @@ func TestMigration0100_CheckConstraints_TriggerTypeShapes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := pool.WithPlatformAdmin(context.Background(), principal, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `
-					INSERT INTO kyc_enforcement_policies
-						(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code,
-						 required_tier, play_operation, reason_code, created_by_actor_type, created_by_actor_id)
-					VALUES ($1, $2, 'draft', $3, $4, $5, $6, 'test', 'platform_admin', $7)`,
-					jurisdictionID, tc.triggerType, tc.threshold, tc.assetCode, tc.tier, tc.playOp, principal)
+				// The creation proof is attached for every shape: an invalid shape must still be refused by its CHECK constraint.
+				_, err := rawDraftPolicy(ctx, tx, principal, jurisdictionID, tc.triggerType, tc.threshold, tc.assetCode, tc.tier, tc.playOp, "", "test")
 				return err
 			})
 			if tc.wantErr && err == nil {
@@ -998,32 +994,22 @@ func TestMigration0100_CheckConstraints_TriggerTypeShapes(t *testing.T) {
 // constraints change).
 func TestMigration0100_ActiveRequiresLegalReviewReference(t *testing.T) {
 	pool := testPool(t)
-	principal := uuid.New()
+	principal := polAdmin(t, pool)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
 
 	wantConstraint := lookupCheckConstraintName(t, pool, "kyc_enforcement_policies",
 		"legal_review_reference IS NOT NULL")
 
 	// A draft with no legal_review_reference inserts cleanly...
-	var id uuid.UUID
-	err := pool.WithPlatformAdmin(context.Background(), principal, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code,
-				 reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', 'test', 'platform_admin', $2)
-			RETURNING id`, jurisdictionID, principal).Scan(&id)
-	})
-	if err != nil {
-		t.Fatalf("expected a draft with no legal_review_reference to insert, got: %v", err)
-	}
+	id := rawDraft(t, pool, principal, jurisdictionID, "cumulative_deposit", "100", "EUR", nil, nil, "")
 
 	// ...but activating it (draft -> active) with no legal_review_reference
 	// must be refused by THIS EXACT CHECK constraint, not merely "some"
 	// error.
-	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'active' WHERE id = $1`, id)
-		return err
+	activator := polAdmin(t, pool)
+	err := pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
+		// With a valid proof the lifecycle trigger passes, so it is THIS CHECK that must refuse the row.
+		return rawTransition(ctx, tx, activator, id, "draft", "active", nil)
 	})
 	if err == nil {
 		t.Fatal("expected activating a row with no legal_review_reference to be rejected")
@@ -1116,7 +1102,8 @@ func mustActivePolicy(t *testing.T, pool *db.Pool, p CreateEnforcementPolicyPara
 		p.ReasonCode = "test"
 	}
 	var id uuid.UUID
-	creator := uuid.New()
+	creator, activator := polAdmin(t, pool), polAdmin(t, pool)
+	p.Proof = polSigner
 	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		id, err = CreateEnforcementPolicy(ctx, tx, p)
@@ -1125,8 +1112,8 @@ func mustActivePolicy(t *testing.T, pool *db.Pool, p CreateEnforcementPolicyPara
 	if err != nil {
 		t.Fatalf("create policy: %v", err)
 	}
-	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		return ActivateEnforcementPolicy(ctx, tx, id)
+	err = pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
+		return ActivateEnforcementPolicy(ctx, tx, id, pol("fixture_activate"))
 	})
 	if err != nil {
 		t.Fatalf("activate policy: %v", err)

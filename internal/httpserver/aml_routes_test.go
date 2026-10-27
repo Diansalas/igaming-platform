@@ -34,11 +34,12 @@ import (
 // TestStaffRoutes_DBFree_ChainOnEveryRoute; the step-up classes are pinned against the signer backstop below.
 
 type fakeAML struct {
-	calls   []string
-	actors  []aml.Actor
-	err     error
-	lastIn  aml.PlaceHoldInput
-	lastSeq int
+	calls      []string
+	actors     []aml.Actor
+	err        error
+	lastIn     aml.PlaceHoldInput
+	lastSeq    int
+	lastPolicy aml.ScreeningPolicyInput
 }
 
 func (f *fakeAML) rec(op string, a aml.Actor) error {
@@ -83,6 +84,28 @@ func (f *fakeAML) FlagSAR(_ context.Context, a aml.Actor, _ uuid.UUID, _ int, _ 
 }
 func (f *fakeAML) Propose(_ context.Context, a aml.Actor, _ uuid.UUID, _ int, _ aml.ProposeInput) (aml.Proposal, error) {
 	return aml.Proposal{Seq: 2, ContentHash: strings.Repeat("a", 64)}, f.rec("Propose", a)
+}
+func (f *fakeAML) SetScreeningTriggerPolicy(_ context.Context, a aml.Actor, _ aml.SetTriggerPolicyInput) (uuid.UUID, error) {
+	return uuid.New(), f.rec("SetScreeningTriggerPolicy", a)
+}
+func (f *fakeAML) EffectiveScreeningTriggerPolicy(_ context.Context, a aml.Actor, _ uuid.UUID) (*aml.TriggerPolicy, error) {
+	return nil, f.rec("EffectiveScreeningTriggerPolicy", a)
+}
+func (f *fakeAML) AuthorScreeningPolicy(_ context.Context, a aml.Actor, in aml.ScreeningPolicyInput) (uuid.UUID, error) {
+	f.lastPolicy = in
+	return uuid.New(), f.rec("AuthorScreeningPolicy", a)
+}
+func (f *fakeAML) EffectiveScreeningPolicy(_ context.Context, a aml.Actor, _ uuid.UUID) (*aml.Policy, error) {
+	return nil, f.rec("EffectiveScreeningPolicy", a)
+}
+func (f *fakeAML) ListScreeningRequests(_ context.Context, a aml.Actor, _ uuid.UUID) ([]aml.ScreeningRequestRow, error) {
+	return nil, f.rec("ListScreeningRequests", a)
+}
+func (f *fakeAML) ReplaceScreeningRequest(_ context.Context, a aml.Actor, _ uuid.UUID, _ *uuid.UUID, _ string) (aml.ReplaceScreeningResult, error) {
+	return aml.ReplaceScreeningResult{NewRequestID: uuid.New()}, f.rec("ReplaceScreeningRequest", a)
+}
+func (f *fakeAML) ResolveScreeningRequest(_ context.Context, a aml.Actor, _, _ uuid.UUID, _ aml.ResolveScreeningInput) (aml.ScreeningRecorded, error) {
+	return aml.ScreeningRecorded{ResultID: uuid.New()}, f.rec("ResolveScreeningRequest", a)
 }
 func (f *fakeAML) Approve(_ context.Context, a aml.Actor, _ uuid.UUID, _ int, _, _ string) (int, error) {
 	return 4, f.rec("Approve", a)
@@ -577,5 +600,58 @@ func TestSetScreeningPolicy_IsNotRoutedYet_SR7_3(t *testing.T) {
 	}
 	if len(offenders) != 0 {
 		t.Fatalf("SR7-3: SetScreeningPolicy is referenced outside internal/aml (a route needs step-up critical + four-eyes for loosening first): %v", offenders)
+	}
+}
+
+// d1 (migration 0191, D4): the OWNER-ONLY break-glass trigger policy setter (aml.Service.OwnerSetScreeningTriggerPolicy, which can loosen the
+// trigger policy with one officer chain) is never reachable from the HTTP layer or any other production file outside internal/aml: the route
+// calls the tighten-only SetScreeningTriggerPolicy (aml_screening_trigger_policy_author) and AMLOfficerAPI does not expose the owner method.
+func TestOwnerSetScreeningTriggerPolicy_IsNeverRouted_D1(t *testing.T) {
+	if _, ok := reflect.TypeOf((*AMLOfficerAPI)(nil)).Elem().MethodByName("OwnerSetScreeningTriggerPolicy"); ok {
+		t.Fatal("d1: AMLOfficerAPI must not expose OwnerSetScreeningTriggerPolicy (it can loosen the trigger policy with one officer chain)")
+	}
+	var offenders []string
+	err := filepath.WalkDir("../..", func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "node_modules", ".git", "backoffice", ".claude":
+				return filepath.SkipDir
+			case "aml":
+				if strings.HasSuffix(filepath.ToSlash(p), "internal/aml") {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		if strings.Contains(string(b), "OwnerSetScreeningTriggerPolicy") || strings.Contains(string(b), "aml_screening_trigger_policy_set") {
+			offenders = append(offenders, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the owner-path fixture helper may name the owner method or function, in a COMMENT (internal/testsupport/amlfix): none is allowed in code.
+	for _, p := range offenders {
+		b, _ := os.ReadFile(p)
+		for _, line := range strings.Split(string(b), "\n") {
+			code := strings.TrimSpace(line)
+			if strings.HasPrefix(code, "//") || strings.HasPrefix(code, "--") {
+				continue
+			}
+			if strings.Contains(code, "OwnerSetScreeningTriggerPolicy") || strings.Contains(code, "aml_screening_trigger_policy_set") {
+				t.Errorf("d1: %s names the owner-only trigger policy setter in code: %q", p, code)
+			}
+		}
 	}
 }

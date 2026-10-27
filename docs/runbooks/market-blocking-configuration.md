@@ -32,17 +32,22 @@ A freshly migrated database has no country rows, so **everything is refused**. T
 | Tenant opt-in per country (absence = terminal block) | `operating_country_policies` (scope tenant) | `operatingmarket.CreateOperatingCountryPolicyVersion` | tenant transaction |
 | Brand and operation narrowing | `operating_country_policies` (scope brand / operation) | same | tenant transaction |
 
-**There is no HTTP route and no console for these rows** (ADR 0045: zero routes; `NOT IMPLEMENTED`). A change is a reviewed Go call (a one-off
-operator tool or script that uses the functions above; an agent never runs it against a shared or production database) by a human with
-legitimate access. Rules enforced by the package and by migration 0076:
+**Since migration 0177 (MKT-DUAL-1) every runtime write of these rows goes through the licensing change primitive**:
+`POST /v1/admin/licensing-changes` with kind `licence_ceiling_version` or `operating_policy_version`, then two approvals by two
+other Persons for a widening change (enable; a withdrawal at the brand / operation rung). A disable, or a withdrawal at the tenant
+rung, executes immediately (single actor with a reason code). The database refuses any other runtime write (LC040). Procedure:
+`licensing-change-approvals.md`. Back Office filing dialogs exist since lic31 (licence page: country ceilings; tenant licensing page: operating-country policies and jurisdiction configurations; `PARTIALLY IMPLEMENTED`: mock-tested only, see `docs/plans/lic31-record.md`). The table owner path
+(`cmd/seed-market`, synthetic staging / development only, refuses production) is unchanged. Rules enforced by the package and by
+migration 0076:
 
 - Enabling (state `enabled`, status `active`) requires a non-empty `AuthorizationReference` at every rung; withdrawing a brand/operation
   row also needs one (it removes a block). **Disabling needs none** (the emergency stop, section 5).
 - A tenant policy cannot enable a country above the licence ceiling (`ErrCeilingExceeded`).
 - A change takes effect on the next request (the gate reads the database clock); old versions stay as history.
 - Call at most once per key per transaction.
-- MKT-DUAL-1 (four-eyes on market enablement) is OPEN: until it is built, require two humans by process (one prepares, one reviews the
-  script and the `AuthorizationReference` before it is run) and record both in the change ticket. **OWNER decision.**
+- MKT-DUAL-1 (four-eyes on market enablement) is IMPLEMENTED in software by migration 0177 for every runtime writer. The approver
+  roles and count are an INTERIM answer (platform_admin only, two approvals): HDR-M-1 remains an **OWNER decision**
+  (`licensing-change-approvals.md`, section 7).
 
 ## 3. Environments
 

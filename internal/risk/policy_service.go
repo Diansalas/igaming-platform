@@ -138,7 +138,32 @@ type CreateRuleParams struct {
 	IPAddress string
 	UserAgent string
 	RequestID string
+
+	// TestOnlyBypassAuthoringRefusals lets a TEST seed a legacy fixture that
+	// CreateRule would otherwise refuse (a deposit rule, a jurisdiction-scoped
+	// rule). Production code must never set it; a static test pins that.
+	TestOnlyBypassAuthoringRefusals bool
 }
+
+// ErrJurisdictionScopeUnsupported (stable code jurisdiction_scope_unsupported):
+// a jurisdiction-scoped rule cannot be authored today. Every evaluator supplies
+// an empty jurisdiction_code (the player-scoped resolver is unresolved(no_signal)
+// for every player, ADR 0042 HDR-J-1/HDR-J-3 pending, and the withdrawal gate
+// has no jurisdiction source at all), so such a rule would end in
+// ErrMissingJurisdiction and refuse EVERY evaluation of its operation,
+// including every withdrawal and dispatch (player funds stuck). The designed
+// R-2b precondition (jurisdiction.IsActive) is deliberately NOT used as the
+// gate: an "active" fact does not make a player-scoped resolution succeed, so
+// it would still brick the operation. Refusal lifts only when a player-scoped
+// jurisdiction is actually resolvable (docs/plans/licensing-audit-enforcement.md
+// section 6.2).
+var ErrJurisdictionScopeUnsupported = fmt.Errorf("%w: jurisdiction_scope_unsupported: jurisdiction-scoped risk rules cannot be authored until a player-scoped jurisdiction can be resolved (every evaluator would refuse every request)", ErrInvalidInput)
+
+// ErrOperationNotEvaluated (stable code operation_not_evaluated): the deposit
+// path does not call risk.Evaluate, so a deposit rule would be accepted, stored
+// and never enforced (a false sense of security). Refused until the deposit
+// path evaluates risk.
+var ErrOperationNotEvaluated = fmt.Errorf("%w: operation_not_evaluated: deposit risk rules cannot be authored because no deposit path evaluates them", ErrInvalidInput)
 
 // CreateRule inserts a new risk_rules row and audits it
 // (risk.rule_created) - directive §23's "audit: rule created" minimum.
@@ -148,6 +173,14 @@ func CreateRule(ctx context.Context, tx pgx.Tx, params CreateRuleParams) (Rule, 
 	}
 	if params.Threshold < 0 {
 		return Rule{}, fmt.Errorf("%w: threshold must be non-negative", ErrInvalidInput)
+	}
+	if !params.TestOnlyBypassAuthoringRefusals {
+		if params.Operation == OperationDeposit {
+			return Rule{}, ErrOperationNotEvaluated
+		}
+		if params.JurisdictionCode != "" {
+			return Rule{}, ErrJurisdictionScopeUnsupported
+		}
 	}
 	// Threshold denomination, declared exactly once (ADR 0031 §35,
 	// closing §32(d)'s fail-open): either the rule is asset-scoped (the

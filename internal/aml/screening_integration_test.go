@@ -79,14 +79,14 @@ func TestScreeningPolicy_VersionsQuorumAndScope(t *testing.T) {
 		t.Fatalf("unconfigured must be nil: %+v %v", p, err)
 	}
 	// Below quorum nothing can be activated.
-	if _, err := svc.SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); !errors.Is(err, aml.ErrQuorum) {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); !errors.Is(err, aml.ErrQuorum) {
 		t.Fatalf("one officer is not a quorum: %v", err)
 	}
 	q := &amlfix.Quorum{Tenant: w.Tenant, OwnerScope: w.Scope, Officers: solo.Officers}
 	q.Officers = append(q.Officers, amlfix.NewOfficer(t, w.Owner, w.Tenant))
 
 	old := time.Now().Add(-2 * time.Hour)
-	id1, err := svc.SetScreeningPolicy(ctx, a, policyInput(j, old))
+	id1, err := ownerSvc(t).SetScreeningPolicy(ctx, a, policyInput(j, old))
 	if err != nil || id1 == uuid.Nil {
 		t.Fatalf("set policy: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestScreeningPolicy_VersionsQuorumAndScope(t *testing.T) {
 	// A FUTURE version is not effective yet; the previous one still is. A newer effective version wins.
 	in := policyInput(j, time.Now().Add(time.Hour))
 	in.Lists = []aml.ListType{aml.ListSanctions}
-	if _, err := svc.SetScreeningPolicy(ctx, a, in); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, a, in); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := svc.EffectiveScreeningPolicy(ctx, a, j); p == nil || len(p.Lists) != 2 {
@@ -106,7 +106,7 @@ func TestScreeningPolicy_VersionsQuorumAndScope(t *testing.T) {
 	in2 := policyInput(j, time.Now().Add(-time.Minute))
 	in2.Lists = []aml.ListType{aml.ListPEP}
 	in2.RescreenInterval = 48 * time.Hour
-	if _, err := svc.SetScreeningPolicy(ctx, a, in2); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, a, in2); err != nil {
 		t.Fatal(err)
 	}
 	if p, _ := svc.EffectiveScreeningPolicy(ctx, a, j); p == nil || len(p.Lists) != 1 || p.Lists[0] != aml.ListPEP || p.RescreenInterval != 48*time.Hour {
@@ -117,7 +117,7 @@ func TestScreeningPolicy_VersionsQuorumAndScope(t *testing.T) {
 		t.Fatalf("another jurisdiction must be unconfigured: %+v", p)
 	}
 	// A non-existent jurisdiction is refused by the foreign key (no orphan policy).
-	if _, err := svc.SetScreeningPolicy(ctx, a, policyInput(uuid.New(), old)); err == nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, a, policyInput(uuid.New(), old)); err == nil {
 		t.Fatal("a policy for an unknown jurisdiction must be refused")
 	}
 	// The policy table is not readable by the runtime role, and the reader is session-tenant bound.
@@ -144,9 +144,8 @@ func TestScreeningPolicy_VersionsQuorumAndScope(t *testing.T) {
 // Screening configuration is platform-authored: a TENANT-scope officer of an own-licence tenant is refused even with a quorum.
 func TestScreeningPolicy_TenantOfficerCannotAuthor(t *testing.T) {
 	w := newWorld(t, "own_licence")
-	svc := amlfix.Service(t, w.RT)
 	q := amlfix.Bootstrap(t, w.Owner, w.Tenant, 2)
-	if _, err := svc.SetScreeningPolicy(context.Background(), q.Officers[0].Actor, policyInput(w.jurisdiction(), time.Now().Add(-time.Hour))); !errors.Is(err, aml.ErrForbidden) {
+	if _, err := ownerSvc(t).SetScreeningPolicy(context.Background(), q.Officers[0].Actor, policyInput(w.jurisdiction(), time.Now().Add(-time.Hour))); !errors.Is(err, aml.ErrForbidden) {
 		t.Fatalf("a tenant officer must not author screening configuration: %v", err)
 	}
 }
@@ -170,7 +169,7 @@ func TestScreening_EndToEnd_OutcomesPlaceTheRequiredHolds(t *testing.T) {
 	w, q, svc := platformWorld(t)
 	j := w.jurisdiction()
 	a := q.Officers[0].Actor
-	if _, err := svc.SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	o := orchestrator(t, svc)
@@ -708,7 +707,6 @@ func TestScreeningResults_ChecksFailClosedInTheDatabase(t *testing.T) {
 func TestAMLReadiness_QuorumAndPolicyCounts(t *testing.T) {
 	ctx := context.Background()
 	w := newWorld(t, "under_platform_licence")
-	svc := amlfix.Service(t, w.RT)
 	j1, j2 := w.jurisdiction(), w.jurisdiction()
 	read := func() (scope string, quorum bool, total, with int) {
 		t.Helper()
@@ -732,10 +730,10 @@ func TestAMLReadiness_QuorumAndPolicyCounts(t *testing.T) {
 		t.Fatal("two distinct officers are a quorum")
 	}
 	// A TENANT-scope officer in a platform-licensed tenant is not a member of the PLATFORM quorum.
-	if _, err := svc.SetScreeningPolicy(ctx, two[0].Actor, policyInput(j1, time.Now().Add(-time.Hour))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, two[0].Actor, policyInput(j1, time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.SetScreeningPolicy(ctx, two[0].Actor, policyInput(j2, time.Now().Add(time.Hour))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, two[0].Actor, policyInput(j2, time.Now().Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	if _, q, tot, with := read(); !q || tot != 2 || with != 1 {
@@ -824,7 +822,7 @@ func TestScreeningPolicy_JurisdictionMustBeOneTheTenantOperatesIn(t *testing.T) 
 	foreign := w.bareJurisdiction()
 	w.configure(other.Tenant, foreign, nil)
 	for name, j := range map[string]uuid.UUID{"never configured": never, "configuration ended": ended, "configured for another tenant": foreign} {
-		if _, err := svc.SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); !errors.Is(err, aml.ErrInvalidInput) {
+		if _, err := ownerSvc(t).SetScreeningPolicy(ctx, a, policyInput(j, time.Now().Add(-time.Hour))); !errors.Is(err, aml.ErrInvalidInput) {
 			t.Errorf("%s: want ErrInvalidInput, got %v", name, err)
 		}
 		if p, err := svc.EffectiveScreeningPolicy(ctx, a, j); err != nil || p != nil {
@@ -833,7 +831,7 @@ func TestScreeningPolicy_JurisdictionMustBeOneTheTenantOperatesIn(t *testing.T) 
 	}
 	// The session tenant setting of the caller is restored around the check: the configured jurisdiction is accepted afterwards.
 	ok := w.jurisdiction()
-	if _, err := svc.SetScreeningPolicy(ctx, a, policyInput(ok, time.Now().Add(-time.Hour))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, a, policyInput(ok, time.Now().Add(-time.Hour))); err != nil {
 		t.Fatalf("a configured jurisdiction must be accepted: %v", err)
 	}
 	if p, err := svc.EffectiveScreeningPolicy(ctx, a, ok); err != nil || p == nil {

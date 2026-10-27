@@ -24,19 +24,9 @@ import (
 // returning its id. Used only to set up fixtures for these tests.
 func seedActivePolicy(t *testing.T, pool *db.Pool, jurisdictionID uuid.UUID, creator, activator uuid.UUID, legalRef string) uuid.UUID {
 	t.Helper()
-	var id uuid.UUID
-	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', $2, 'test', 'platform_admin', $3)
-			RETURNING id`, jurisdictionID, legalRef, creator).Scan(&id)
-	})
-	if err != nil {
-		t.Fatalf("seed draft policy: %v", err)
-	}
+	id := rawDraft(t, pool, creator, jurisdictionID, "cumulative_deposit", "100", "EUR", nil, nil, legalRef)
 	if err := pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
-		return ActivateEnforcementPolicy(ctx, tx, id)
+		return ActivateEnforcementPolicy(ctx, tx, id, pol("fixture_activate"))
 	}); err != nil {
 		t.Fatalf("activate policy: %v", err)
 	}
@@ -50,11 +40,11 @@ func seedActivePolicy(t *testing.T, pool *db.Pool, jurisdictionID uuid.UUID, cre
 func TestMigration0103_WithdrawActiveRefusedWithNoSuccessor(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
-	creator, activator, withdrawer := uuid.New(), uuid.New(), uuid.New()
+	creator, activator, withdrawer := polAdmin(t, pool), polAdmin(t, pool), polAdmin(t, pool)
 	id := seedActivePolicy(t, pool, jurisdictionID, creator, activator, "legal-f3-nosucc")
 
 	err := pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
-		return WithdrawEnforcementPolicy(ctx, tx, id, "active")
+		return WithdrawEnforcementPolicy(ctx, tx, id, "active", pol("fixture_withdraw"))
 	})
 	if err == nil {
 		t.Fatal("expected WithdrawEnforcementPolicy on an ACTIVE row with no successor to be refused by the database (security F3)")
@@ -77,23 +67,14 @@ func TestMigration0103_WithdrawActiveRefusedWithNoSuccessor(t *testing.T) {
 func TestMigration0103_SupersessionRefusedIfSuccessorNeverActivated(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
-	creator, activator, withdrawer := uuid.New(), uuid.New(), uuid.New()
+	creator, activator, withdrawer := polAdmin(t, pool), polAdmin(t, pool), polAdmin(t, pool)
 	oldID := seedActivePolicy(t, pool, jurisdictionID, creator, activator, "legal-f3-draft-succ-old")
 
-	var draftSuccessorID uuid.UUID
-	if err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', 'legal-f3-draft-succ-new', 'test', 'platform_admin', $2)
-			RETURNING id`, jurisdictionID, creator).Scan(&draftSuccessorID)
-	}); err != nil {
-		t.Fatalf("seed draft successor: %v", err)
-	}
+	draftSuccessorID := rawDraft(t, pool, creator, jurisdictionID, "cumulative_deposit", "100", "EUR", nil, nil, "legal-f3-draft-succ-new")
 
 	err := pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
 		// Never activated - stays 'draft' through commit.
-		return withdrawEnforcementPolicyWithSuccessor(ctx, tx, oldID, "active", draftSuccessorID)
+		return withdrawEnforcementPolicyWithSuccessor(ctx, tx, oldID, "active", draftSuccessorID, pol("fixture_supersede"))
 	})
 	if err == nil {
 		t.Fatal("expected supersession naming a still-draft successor to be refused at commit")
@@ -118,13 +99,13 @@ func TestMigration0103_SupersessionRefusedIfSuccessorKeyDiffers(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionA := mustSeedJurisdiction(t, pool)
 	jurisdictionB := mustSeedJurisdiction(t, pool)
-	creator, activator, withdrawer := uuid.New(), uuid.New(), uuid.New()
+	creator, activator, withdrawer := polAdmin(t, pool), polAdmin(t, pool), polAdmin(t, pool)
 	oldID := seedActivePolicy(t, pool, jurisdictionA, creator, activator, "legal-f3-keymismatch-old")
 	// A genuinely active policy, but for jurisdictionB - not the same key.
 	wrongKeySuccessorID := seedActivePolicy(t, pool, jurisdictionB, creator, activator, "legal-f3-keymismatch-new")
 
 	err := pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
-		return withdrawEnforcementPolicyWithSuccessor(ctx, tx, oldID, "active", wrongKeySuccessorID)
+		return withdrawEnforcementPolicyWithSuccessor(ctx, tx, oldID, "active", wrongKeySuccessorID, pol("fixture_supersede"))
 	})
 	if err == nil {
 		t.Fatal("expected supersession naming an active-but-wrong-key successor to be refused at commit")
@@ -146,11 +127,11 @@ func TestMigration0103_SupersessionRefusedIfSuccessorKeyDiffers(t *testing.T) {
 func TestMigration0103_SupersessionRefusedIfSelfReferencing(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
-	creator, activator, withdrawer := uuid.New(), uuid.New(), uuid.New()
+	creator, activator, withdrawer := polAdmin(t, pool), polAdmin(t, pool), polAdmin(t, pool)
 	id := seedActivePolicy(t, pool, jurisdictionID, creator, activator, "legal-f3-self")
 
 	err := pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
-		return withdrawEnforcementPolicyWithSuccessor(ctx, tx, id, "active", id)
+		return withdrawEnforcementPolicyWithSuccessor(ctx, tx, id, "active", id, pol("fixture_supersede"))
 	})
 	if err == nil {
 		t.Fatal("expected a policy naming itself as its own successor to be refused")
@@ -163,21 +144,12 @@ func TestMigration0103_SupersessionRefusedIfSelfReferencing(t *testing.T) {
 func TestMigration0103_DraftWithdrawalCarriesNoSuccessorRequirement(t *testing.T) {
 	pool := testPool(t)
 	jurisdictionID := mustSeedJurisdiction(t, pool)
-	creator, withdrawer := uuid.New(), uuid.New()
+	creator, withdrawer := polAdmin(t, pool), polAdmin(t, pool)
 
-	var id uuid.UUID
-	if err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `
-			INSERT INTO kyc_enforcement_policies
-				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
-			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', 'legal-f3-draft-withdraw', 'test', 'platform_admin', $2)
-			RETURNING id`, jurisdictionID, creator).Scan(&id)
-	}); err != nil {
-		t.Fatalf("seed draft policy: %v", err)
-	}
+	id := rawDraft(t, pool, creator, jurisdictionID, "cumulative_deposit", "100", "EUR", nil, nil, "legal-f3-draft-withdraw")
 
 	if err := pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
-		return WithdrawEnforcementPolicy(ctx, tx, id, "draft")
+		return WithdrawEnforcementPolicy(ctx, tx, id, "draft", pol("fixture_withdraw"))
 	}); err != nil {
 		t.Fatalf("expected withdrawing a DRAFT row (never active) to succeed with no successor: %v", err)
 	}

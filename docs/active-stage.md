@@ -1,5 +1,9 @@
 # Active Stage
 
+**Current-state entry 2026-10-20 (licensing/jurisdiction configurable operating model; supersedes the 2026-10-19 licensing entry; history not rewritten).**
+Branch `claude/licensing-jurisdiction-completion` (frozen baseline `1505a16` untouched). Migration head **0185**. Owner clarification 2026-10-20: country list and operating arrangements are future business configuration, not engineering prerequisites (ADR 0124; `docs/plans/licensing-configurable-operating-model-2026-10-20.md`). Delivered: operating bases (0180/0183), AML screening triggers MOCK + withdrawal gate guards (0181), withdrawal restriction policy (0182/0184), signed KYC policy writes (0185), Back Office screens, real-stack e2e harness. Completion report: `docs/plans/licensing-configurable-operating-model-completion-report-2026-10-20.md`. Real providers and AWS remain deferred.
+
+
 **Current-state entry 2026-10-17 (final closure; supersedes the earlier 2026-10-17 freeze entry).**
 Authoritative detail: `docs/plans/final-platform-closure-report-2026-10-17.md`. Migration head **0175**. **Provider-independent platform technically FROZEN: no class-A item remains** (F4 R1 closed for the SQL-only attacker, deposit tombstones proof-bound, statement-integrity items, jurisdiction TODOs, frontend exact money, audit proofs, detection of negative wallets, first-deposit backstop, namespace checks); accepted residuals B, provider-dependent C, AWS-dependent D and human/legal E are listed in the report. Providers MOCK; AWS OFF (plan ready, NOT started); no brand activated. **Next only on the owner's explicit go:** the single AWS staging deployment, then provider integration (PSP first).
 

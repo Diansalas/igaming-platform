@@ -121,6 +121,32 @@ const (
 	CodeLaunchProofRefused                  Code = "LAUNCH_PROOF_REFUSED"             // 403: the ADR 0110 actor proof guard (AP0xx)
 	CodeLaunchNoPerson                      Code = "LAUNCH_NO_PERSON"                 // 403: the staff account has no readable Person (four-eyes cannot be evaluated)
 	CodeLaunchUnavailable                   Code = "LAUNCH_AUTHORISATION_UNAVAILABLE" // 503: the service is not wired in this process
+
+	// Migration 0177 (MKT-DUAL-1): the closed LICENSING_CHANGE_* codes of the licensing / jurisdiction change routes.
+	CodeLicensingChangeSelfApproval      Code = "LICENSING_CHANGE_SELF_APPROVAL"          // 409: requester / same Person
+	CodeLicensingChangeNotPending        Code = "LICENSING_CHANGE_NOT_PENDING"            // 409: decided, executed, cancelled or expired
+	CodeLicensingChangeAlreadyDecided    Code = "LICENSING_CHANGE_ALREADY_DECIDED"        // 409: a replayed approval by the same Person
+	CodeLicensingChangeDuplicatePending  Code = "LICENSING_CHANGE_DUPLICATE_PENDING"      // 409: an identical request is already open
+	CodeLicensingChangeApprovalsStale    Code = "LICENSING_CHANGE_APPROVALS_STALE"        // 409: approvals older than the approval window
+	CodeLicensingChangeRefused           Code = "LICENSING_CHANGE_REFUSED"                // 409: the domain writer refused (ceiling, concurrency)
+	CodeLicensingChangeGuardRefused      Code = "LICENSING_CHANGE_GUARD_REFUSED"          // 409: a database guard (LC0xx)
+	CodeLicensingChangeRetryableLockWait Code = "LICENSING_CHANGE_RETRYABLE_LOCK_TIMEOUT" // 409: lock timeout / deadlock: retry
+	CodeLicensingChangeProofRefused      Code = "LICENSING_CHANGE_PROOF_REFUSED"          // 403: the ADR 0110 actor proof guard (AP0xx)
+	CodeLicensingChangeNoPerson          Code = "LICENSING_CHANGE_NO_PERSON"              // 403: no readable Person (four-eyes cannot be evaluated)
+	CodeLicensingChangeUnavailable       Code = "LICENSING_CHANGE_UNAVAILABLE"            // 503: the service is not wired in this process
+
+	// lic11 (migration 0182): the closed WITHDRAWAL_RESTRICTION_POLICY_* codes of the withdrawal restriction policy routes.
+	CodeWRPSelfApproval      Code = "WITHDRAWAL_RESTRICTION_POLICY_SELF_APPROVAL"          // 409: requester / same Person
+	CodeWRPNotPending        Code = "WITHDRAWAL_RESTRICTION_POLICY_NOT_PENDING"            // 409: decided, executed, cancelled or expired
+	CodeWRPAlreadyDecided    Code = "WITHDRAWAL_RESTRICTION_POLICY_ALREADY_DECIDED"        // 409: a replayed approval by the same Person
+	CodeWRPDuplicatePending  Code = "WITHDRAWAL_RESTRICTION_POLICY_DUPLICATE_PENDING"      // 409: an open change for the tenant and cause exists
+	CodeWRPApprovalsStale    Code = "WITHDRAWAL_RESTRICTION_POLICY_APPROVALS_STALE"        // 409: approvals older than the approval window
+	CodeWRPNotConfigurable   Code = "WITHDRAWAL_RESTRICTION_POLICY_NOT_CONFIGURABLE"       // 409: owner-decided or not evaluable cause
+	CodeWRPGuardRefused      Code = "WITHDRAWAL_RESTRICTION_POLICY_GUARD_REFUSED"          // 409: a database guard (WR0xx / LC0xx)
+	CodeWRPRetryableLockWait Code = "WITHDRAWAL_RESTRICTION_POLICY_RETRYABLE_LOCK_TIMEOUT" // 409: lock timeout / deadlock: retry
+	CodeWRPProofRefused      Code = "WITHDRAWAL_RESTRICTION_POLICY_PROOF_REFUSED"          // 403: the ADR 0110 actor proof guard (AP0xx)
+	CodeWRPNoPerson          Code = "WITHDRAWAL_RESTRICTION_POLICY_NO_PERSON"              // 403: no readable Person
+	CodeWRPUnavailable       Code = "WITHDRAWAL_RESTRICTION_POLICY_UNAVAILABLE"            // 503: the service is not wired in this process
 )
 
 // A10c (ADR 0114 G10): the staff Idempotency-Key wrapper on the K1 / K3 / HSEC mutating routes.
@@ -216,6 +242,7 @@ func httpStatus(c Code) int {
 	case CodeUnauthorized, CodeInvalidMFACode, CodeInvalidChallenge, CodeInvalidEnrolmentToken, CodeSessionRevoked:
 		return http.StatusUnauthorized
 	case CodeForbidden, CodeTenantMismatch, CodeLaunchProofRefused, CodeLaunchNoPerson,
+		CodeLicensingChangeProofRefused, CodeLicensingChangeNoPerson, CodeWRPProofRefused, CodeWRPNoPerson,
 		CodeRGStepUpRequired, CodeRGSelfTarget, CodeRGIdentityReview, CodeRGProofRefused, CodeMarketNotAvailable,
 		CodeMFAEnrolmentRequired, CodeMFALocked, CodeStepUpRequired,
 		CodeSelfTargetForbidden, CodeRoleNotGrantable, CodeFourEyesViolation:
@@ -232,6 +259,11 @@ func httpStatus(c Code) int {
 		CodeLaunchIllegalTransition, CodeLaunchSubjectClosed, CodeLaunchWithdrawalsHolding, CodeLaunchOpenBetsBlockClosure,
 		CodeLaunchRetryableLockTimeout, CodeLaunchRequestNotPending, CodeLaunchAlreadyDecided, CodeLaunchStaleReadiness, CodeLaunchPriorReject,
 		CodeLaunchPriorRejecter, CodeLaunchNotLegacyBaseline, CodeLaunchRefusedAtExecution, CodeLaunchGuardRefused,
+		CodeLicensingChangeSelfApproval, CodeLicensingChangeNotPending, CodeLicensingChangeAlreadyDecided,
+		CodeLicensingChangeDuplicatePending, CodeLicensingChangeApprovalsStale, CodeLicensingChangeRefused,
+		CodeLicensingChangeGuardRefused, CodeLicensingChangeRetryableLockWait,
+		CodeWRPSelfApproval, CodeWRPNotPending, CodeWRPAlreadyDecided, CodeWRPDuplicatePending, CodeWRPApprovalsStale,
+		CodeWRPNotConfigurable, CodeWRPGuardRefused, CodeWRPRetryableLockWait,
 		CodeKillSwitchReleaseRequestAlreadyOpen, CodeMFAEnrolmentExpired,
 		CodeLastAdmin, CodeLifecycleBusy, CodeLifecycleTransitionInvalid,
 		CodeRGNoChange, CodeRGChangeNotPending, CodeRGCoolingOff, CodeRGConfigMissing, CodeRGPendingCap,
@@ -241,7 +273,7 @@ func httpStatus(c Code) int {
 	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch, CodePersonRequired,
 		CodeRGLimitAboveCeiling, CodeRGPeriodNotAllowed, CodeRGDurationNotAllowed, CodeRGNotOffered, CodeRGBackdated, CodeRGSyntheticRefused:
 		return http.StatusUnprocessableEntity
-	case CodeUnavailable, CodeLaunchUnavailable, CodeRGUnavailable:
+	case CodeUnavailable, CodeLaunchUnavailable, CodeRGUnavailable, CodeLicensingChangeUnavailable, CodeWRPUnavailable:
 		return http.StatusServiceUnavailable
 	case CodeRateLimited:
 		return http.StatusTooManyRequests

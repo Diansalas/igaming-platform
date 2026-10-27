@@ -25,7 +25,7 @@ func TestSanctionsPotential_LiftIsFourEyesAndNotByTheRecorder(t *testing.T) {
 	w, q, svc := platformWorld(t)
 	j := w.jurisdiction()
 	A, B := q.Officers[0].Actor, q.Officers[1].Actor
-	if _, err := svc.SetScreeningPolicy(ctx, A, policyInput(j, time.Now().Add(-time.Hour))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, A, policyInput(j, time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	o := orchestrator(t, svc)
@@ -84,7 +84,7 @@ func TestScreeningHold_RecorderCannotLiftItWhateverTheClass(t *testing.T) {
 	w, q, svc := platformWorld(t)
 	j := w.jurisdiction()
 	A, B := q.Officers[0].Actor, q.Officers[1].Actor
-	if _, err := svc.SetScreeningPolicy(ctx, A, policyInput(j, time.Now().Add(-time.Hour))); err != nil {
+	if _, err := ownerSvc(t).SetScreeningPolicy(ctx, A, policyInput(j, time.Now().Add(-time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	o := orchestrator(t, svc)

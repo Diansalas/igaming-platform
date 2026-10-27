@@ -41,17 +41,25 @@ type ChainStep struct {
 	// emission) - nil on every tenant/brand step.
 	BrandID     *uuid.UUID
 	ProductCode *string
+	// lic9: populated ONLY on Scope==ScopeBasis steps.
+	BasisKind   BasisKind
+	ReviewDueAt *time.Time
 }
 
 // Explanation is ExplainOperatingCountryPolicy's result - STAFF/ADMIN
 // ONLY. It carries every diagnostic field Result deliberately withholds.
 type Explanation struct {
-	Query                 Query
-	LicenceID             *uuid.UUID
-	LicenceStatus         string
-	LicenceExpiresAt      *time.Time
-	LicenceValidity       jurisdiction.LicenceValidity
-	CeilingReason         LicenceCeilingReason
+	Query            Query
+	LicenceID        *uuid.UUID
+	LicenceStatus    string
+	LicenceExpiresAt *time.Time
+	LicenceValidity  jurisdiction.LicenceValidity
+	CeilingReason    LicenceCeilingReason
+	// lic9: the explicit operating basis that governed the resolution (BasisKind "" when none was configured for the scope).
+	BasisKind             BasisKind
+	BasisID               *uuid.UUID
+	BasisReason           BasisReason
+	BasisReviewDueAt      *time.Time
 	Chain                 []ChainStep // ordered: licence, tenant, brand, operation
 	Outcome               Outcome
 	SourceScope           Scope
@@ -97,6 +105,11 @@ func ExplainOperatingCountryPolicy(ctx context.Context, tx pgx.Tx, p Query) (Exp
 		PolicyVersion: res.policyVersion,
 		AsOf:          res.asOf,
 	}
+	if res.basisID != uuid.Nil {
+		id := res.basisID
+		exp.BasisID = &id
+	}
+	exp.BasisKind, exp.BasisReason, exp.BasisReviewDueAt = res.basisKind, res.basisReason, res.basisReview
 	if res.licenceID != uuid.Nil {
 		id := res.licenceID
 		exp.LicenceID = &id

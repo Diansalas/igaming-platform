@@ -63,14 +63,19 @@ import (
 // executable body - resolve() computes the identical function of a fixed
 // stored row set before and after AMENDMENT-3, exactly as AMENDMENT-2 did
 // not bump v2 -> v3 for the identical reason (§17).
-const PolicyVersion = "stage-4i-e.v3"
+//
+// v3 -> v4 (lic9, migration 0180): resolve() gained STEP 0, the explicit operating basis (operating_bases): a scope with a
+// configured basis resolves through that basis (a licence of the row, or a documented no-licence determination) and gains the
+// outcome not_permitted_by_basis; a scope with NO operating_bases row resolves exactly as at v3 (the answer for every row set that
+// holds no operating_bases row is unchanged).
+const PolicyVersion = "stage-4i-e.v4"
 
 // --- Errors ---
 
 var (
 	ErrInvalidInput = errors.New("operatingmarket: invalid input")
-	// ErrNotFound is RESERVED: no function in this package currently
-	// returns it (flagged in the Phase E fix round's P3 review). Left
+	// ErrNotFound is returned by the platform read views (admin_reads.go, lic4 slice 4a) for an unknown licence or tenant;
+	// before that it was RESERVED: no function in this package returned it (flagged in the Phase E fix round's P3 review). Left
 	// declared rather than removed - a future read-by-id admin surface
 	// (e.g. reading one specific CeilingRecord/PolicyRecord version by its
 	// id, as opposed to today's list-by-key surfaces) is the obvious,
@@ -119,7 +124,10 @@ const (
 	// ScopeLicence identifies the ceiling in diagnostics (Explanation/
 	// ChainStep) - it is NEVER a stored operating_country_policies.
 	// scope_kind value and is rejected by validWritableScope.
-	ScopeLicence   Scope = "licence"
+	ScopeLicence Scope = "licence"
+	// ScopeBasis identifies the explicit operating basis (lic9) in diagnostics; like ScopeLicence it is never a stored
+	// operating_country_policies.scope_kind and is rejected by validWritableScope.
+	ScopeBasis     Scope = "basis"
 	ScopeTenant    Scope = "tenant"
 	ScopeBrand     Scope = "brand"
 	ScopeOperation Scope = "operation"
@@ -211,7 +219,7 @@ const (
 	CeilingReasonLicenceNotYetIssued LicenceCeilingReason = "licence_not_yet_issued"
 )
 
-// --- Outcome: the eleven-valued, closed resolution outcome ---
+// --- Outcome: the twelve-valued (lic9: was eleven), closed resolution outcome ---
 
 type Outcome string
 
@@ -227,6 +235,10 @@ const (
 	OutcomeInvalidConfiguration  Outcome = "invalid_configuration"
 	OutcomePolicyNotYetEffective Outcome = "policy_not_yet_effective"
 	OutcomePolicyExpired         Outcome = "policy_expired"
+	// OutcomeNotPermittedByBasis (lic9): an explicit operating basis is configured for the scope and does not permit it
+	// (withdrawn, not approved, not in force, review overdue / re-review required, product restricted). Fail closed: every
+	// consumer treats any outcome other than permitted as a refusal.
+	OutcomeNotPermittedByBasis Outcome = "not_permitted_by_basis"
 )
 
 // --- ReadOnlyQuerier: resolve()'s only allowed handle ---
@@ -387,6 +399,8 @@ type Result struct {
 	// Diagnostic provenance. Deliberately UNEXPORTED WITH NO ACCESSOR.
 	licenceID             uuid.UUID
 	licenceCeilingReason  LicenceCeilingReason
+	basisID               uuid.UUID
+	basisKind             BasisKind
 	sourceScope           Scope
 	sourceVersionID       uuid.UUID
 	sourceEffectiveFrom   time.Time

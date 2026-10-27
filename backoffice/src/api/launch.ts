@@ -35,6 +35,8 @@ export interface LaunchReadiness {
   non_passing_check_codes: string[]
   /** Live display data of R-PLAYER-FUNDS (not hashed). */
   counts?: Record<string, number>
+  /** Rule ids only (R-RISK-RULES-LEGACY), capped per key; not hashed. */
+  refs?: Record<string, string[]>
   /** DECIMAL STRINGS per asset. Never parse into a number. */
   balances?: Record<string, string>
   notices?: string[]

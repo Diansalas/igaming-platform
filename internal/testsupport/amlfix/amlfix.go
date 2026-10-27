@@ -264,6 +264,25 @@ func Service(t testing.TB, p aml.Pool) *aml.Service {
 	return s
 }
 
+// OwnerService builds an aml.Service over a TABLE-OWNER pool (TEST_DATABASE_URL, never the runtime role). It is the ONE sanctioned
+// way for a test or a fixture to reach the OWNER-ONLY break-glass writer that the runtime role cannot execute since migration 0191
+// (d1): the screening policy setter aml_screening_policy_set (which can LOOSEN the screening policy with one officer chain; SR7-3 keeps its Go method out of every production file but internal/aml) and the trigger policy setter aml_screening_trigger_policy_set. The
+// authorisation inside that function (officer grant, quorum, signed proof) is unchanged: only the database role that CALLS it differs. It refuses a pool whose session user is the
+// runtime role, so a fixture can never quietly fall back to a runtime path (which would now fail with 42501 anyway).
+func OwnerService(t testing.TB, ownerPool *db.Pool) *aml.Service {
+	t.Helper()
+	var who string
+	if err := ownerPool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT session_user`).Scan(&who)
+	}); err != nil {
+		t.Fatalf("amlfix: read the pool role: %v", err)
+	}
+	if who == "igaming_runtime" {
+		t.Fatalf("amlfix: OwnerService needs the table-owner pool, got the runtime role %q", who)
+	}
+	return Service(t, ownerPool)
+}
+
 // PlaceHold places a hold through the real officer API as officer 0 of the quorum.
 func (q *Quorum) PlaceHold(t testing.TB, svc *aml.Service, person uuid.UUID, account *uuid.UUID, scope aml.HoldScope, class aml.ReasonClass) uuid.UUID {
 	t.Helper()

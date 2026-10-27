@@ -24,11 +24,14 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/launchgov"
+	"github.com/Diansalas/igaming-platform/internal/licensingchange"
 	"github.com/Diansalas/igaming-platform/internal/marketgate"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
+	"github.com/Diansalas/igaming-platform/internal/residenceapproval"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/withdrawalpolicy"
 )
 
 // Deps are the dependencies routes need. Kept as one small struct so
@@ -203,10 +206,29 @@ type Deps struct {
 	// convention, fail closed); cmd/platform-api always sets it.
 	LaunchAuthorisation *launchgov.Service
 
+	// LicensingChanges is the migration 0177 licensing / jurisdiction change service (MKT-DUAL-1): the only runtime writer
+	// of licences, tenants.licence_id, licence_country_ceilings, operating_country_policies and tenant_jurisdiction_configs
+	// (the database refuses any other runtime write, LC040). cmd/platform-api always sets it. When nil and DB is set,
+	// NewWithAdmission builds one over DB that signs with the process actor-proof issuer (actorproof.Default()): with no
+	// issuer every governed write still fails closed (500, nothing written). Nil with no DB makes the routes answer 503.
+	LicensingChanges *licensingchange.Service
+
+	// WithdrawalRestrictionPolicy is the lic11 (migration 0182) withdrawal restriction policy service: the only runtime
+	// writer of withdrawal_restriction_policies (the database refuses any other runtime write, WR040) and the operator read
+	// API. cmd/platform-api always sets it; when nil and DB is set, NewWithAdmission builds one over DB that signs with the
+	// process actor-proof issuer (no issuer: every governed write fails closed). Nil with no DB makes the routes answer 503.
+	WithdrawalRestrictionPolicy *withdrawalpolicy.Service
+
 	// AML is the ADR 0116 officer service behind the AML routes (aml_routes.go). nil makes every AML route answer 503: there
 	// is no fallback and no bypass. Production wiring passes *aml.Service, built with the process actor-proof issuer (nil in
 	// non-production leaves every governed AML write failing closed with ErrProofUnavailable).
 	AML AMLOfficerAPI
+
+	// ResidenceApproval is the lic10 (migration 0181) residence determination maker-checker service behind the policy and
+	// approval routes (residence_approval_routes.go). cmd/platform-api sets it; when nil and DB is set, NewWithAdmission builds
+	// one over DB that signs with the process actor-proof issuer (with no issuer every governed write fails closed). Nil with
+	// no DB makes the routes answer 503.
+	ResidenceApproval ResidenceApprovalAPI
 
 	// PersonResolver is Stage 4E's identity-resolution boundary, consulted
 	// by newRegisterHandler BEFORE a Person is ever created - unlike
@@ -499,6 +521,21 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	// admission call in this package a no-op, preserving pre-PRH-I4
 	// behaviour exactly.
 	deps.webhookAdmission = newWebhookAdmission(deps.WebhookAdmission, deps.DB, deps.Logger)
+	if deps.LicensingChanges == nil && deps.DB != nil {
+		if svc, err := licensingchange.New(licensingchange.Config{Pool: deps.DB}); err == nil {
+			deps.LicensingChanges = svc
+		}
+	}
+	if deps.ResidenceApproval == nil && deps.DB != nil {
+		if svc, err := residenceapproval.New(residenceapproval.Config{Pool: deps.DB}); err == nil {
+			deps.ResidenceApproval = svc
+		}
+	}
+	if deps.WithdrawalRestrictionPolicy == nil && deps.DB != nil {
+		if svc, err := withdrawalpolicy.New(withdrawalpolicy.Config{Pool: deps.DB}); err == nil {
+			deps.WithdrawalRestrictionPolicy = svc
+		}
+	}
 	admissionRuntime := WebhookAdmissionRuntime{rt: deps.webhookAdmission}
 
 	mux.HandleFunc("GET /healthz", livezHandler)
@@ -511,6 +548,8 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	registerRGRoutes(mux, deps)
 	registerCredentialRoutes(mux, deps)
 	registerKYCRoutes(mux, deps)
+	registerKYCEnforcementPolicyRoutes(mux, deps)
+	registerResidenceApprovalRoutes(mux, deps)
 	registerRiskRoutes(mux, deps)
 	registerAssetRegistryRoutes(mux, deps)
 	registerBonusRoutes(mux, deps)

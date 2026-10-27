@@ -186,6 +186,8 @@ func TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList(t *testi
 // brands.status by SQL text (docs/security/launch-status-readers.md, section "Go readers").
 // Each is classified there; every one tests = 'active' / <> 'active' / an explicit reviewed list.
 var reviewedStatusReaderFiles = []string{
+	// lic10 (migration 0181): the automatic AML screening worker lists the active tenants it serves (class A).
+	"internal/aml/screening_worker.go",
 	"internal/bonus/schedulers.go",
 	"internal/identity/brand.go",
 	"internal/identity/player_account.go",

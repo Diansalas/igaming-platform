@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,6 +37,15 @@ import (
 //     DECIDED 'unverified' row (provider_reference set; an orphan intent row
 //     with no reference is not a decision and does not break), and an 'approved'
 //     row whose expires_at has lapsed (its status stays 'approved').
+//
+// LIC10 (migration 0181, audit G8 / owner question Q21): a determination that the tenant's residence approval policy REQUIRES a
+// second Person to approve (residence_determination_checks.approval_required) and that has none yet is PENDING and is NOT
+// evidence: it is excluded from the candidate set, so the read falls back to an older approved determination that is still
+// valid, or to "no evidence" (the caller refuses). The policy mode is snapshotted on each determination when it is made, so the
+// S3: the check also records the COUNTRY it was made for; a check whose country differs from the verification's current country is
+// not trusted either (a determination changed under an existing check can never inherit its approval; the database also refuses
+// such a change, kyc_verifications_residence_guard). The default (no policy, mode none) leaves every determination exactly as effective as before the migration; a determination with
+// no check row (made before the migration) is likewise unchanged. Pending fails closed.
 //
 // Anything else - no row, no determination, an unverified / pending / review /
 // rejected / expired latest row - is "no evidence" and the caller refuses.
@@ -75,6 +85,12 @@ func ReadMarketResidenceEvidence(ctx context.Context, q RowQuerier, tenantID, pl
 		           AND kv.verified_residence_country IS NOT NULL
 		           AND (kv.expires_at IS NULL OR kv.expires_at > clock_timestamp())
 		           AND NOT EXISTS (
+		                 SELECT 1 FROM residence_determination_checks rc
+		                  WHERE rc.tenant_id = $1 AND rc.verification_id = kv.id
+		                    AND rc.determined_at = kv.verified_residence_set_at
+		                    AND ((rc.approval_required AND rc.approved_at IS NULL)
+		                         OR rc.country IS DISTINCT FROM kv.verified_residence_country))
+		           AND NOT EXISTS (
 		                 SELECT 1 FROM kyc_verifications brk
 		                  WHERE brk.tenant_id = $1 AND brk.player_account_id = $2
 		                    AND (brk.created_at, brk.id) > (kv.created_at, kv.id)
@@ -95,4 +111,55 @@ func ReadMarketResidenceEvidence(ctx context.Context, q RowQuerier, tenantID, pl
 		return "", false, fmt.Errorf("kyc: market residence evidence: %w", err)
 	}
 	return c, true, nil
+}
+
+// RowsQuerier is the multi-row read capability (pgx.Tx satisfies it).
+type RowsQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// PendingResidenceApproval is one reviewer determination that is waiting for a second Person (lic10). It carries ids and times
+// only: never the country (reading the residence VALUE is its own permission, HDR-J-3f).
+type PendingResidenceApproval struct {
+	VerificationID  uuid.UUID
+	PlayerAccountID uuid.UUID
+	BrandID         uuid.UUID
+	DeterminedAt    time.Time
+	DeterminedBy    uuid.UUID
+	PolicyMode      string
+}
+
+// MaxPendingResidenceApprovals bounds one list.
+const MaxPendingResidenceApprovals = 200
+
+// ListPendingResidenceApprovals lists the CURRENT determinations that need a second Person and have none, oldest first. A
+// determination replaced by a newer one is not listed (its check no longer matches the verification's current determination).
+// tx must be a tenant-scoped transaction; RLS on both tables is the isolation control and the tenant is repeated in the
+// predicate.
+func ListPendingResidenceApprovals(ctx context.Context, q RowsQuerier, tenantID uuid.UUID, limit int) ([]PendingResidenceApproval, error) {
+	if tenantID == uuid.Nil {
+		return nil, fmt.Errorf("kyc: pending residence approvals: tenant is required")
+	}
+	if limit <= 0 || limit > MaxPendingResidenceApprovals {
+		limit = MaxPendingResidenceApprovals
+	}
+	rows, err := q.Query(ctx, `
+		SELECT c.verification_id, v.player_account_id, v.brand_id, c.determined_at, c.determined_by, c.policy_mode
+		  FROM residence_determination_checks c
+		  JOIN kyc_verifications v ON v.id = c.verification_id AND v.tenant_id = c.tenant_id AND v.verified_residence_set_at = c.determined_at
+		 WHERE c.tenant_id = $1 AND c.approval_required AND c.approved_at IS NULL
+		 ORDER BY c.determined_at, c.verification_id LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("kyc: pending residence approvals: %w", err)
+	}
+	defer rows.Close()
+	var out []PendingResidenceApproval
+	for rows.Next() {
+		var p PendingResidenceApproval
+		if err := rows.Scan(&p.VerificationID, &p.PlayerAccountID, &p.BrandID, &p.DeterminedAt, &p.DeterminedBy, &p.PolicyMode); err != nil {
+			return nil, fmt.Errorf("kyc: pending residence approvals: %w", err)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }

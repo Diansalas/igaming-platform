@@ -31,15 +31,52 @@ import (
 func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 	// --- Platform-wide registries ---
 
+	// Reads (lic4 slice 4a): PermJurisdictionRegistryRead (platform_admin), step-up none.
 	mux.Handle("GET /v1/admin/jurisdictions",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListJurisdictionsHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListJurisdictionsHandler(deps))))
+	mux.Handle("GET /v1/admin/jurisdictions/{jurisdictionID}",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newGetJurisdictionHandler(deps))))
 	mux.Handle("POST /v1/admin/jurisdictions",
 		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newCreateJurisdictionHandler(deps))))
 
 	mux.Handle("GET /v1/admin/licences",
-		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newListLicencesHandler(deps))))
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListLicencesHandler(deps))))
+	mux.Handle("GET /v1/admin/licences/{licenceID}",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newGetLicenceHandler(deps))))
+	mux.Handle("GET /v1/admin/licence-country-ceilings",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListLicenceCountryCeilingsHandler(deps))))
+	mux.Handle("GET /v1/admin/operating-country-policies",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListOperatingCountryPoliciesHandler(deps))))
+	// lic9 (migration 0180): the explicit operating bases (platform_admin read; writes only through licensing changes).
+	mux.Handle("GET /v1/admin/operating-bases",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListOperatingBasesHandler(deps))))
+	mux.Handle("GET /v1/admin/operating-bases/{basisID}",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newGetOperatingBasisHandler(deps))))
+	// c2: TENANT-scoped read of the caller's OWN operating bases (PermOperatingBasisTenantRead, RequireTenantScope; the tenant is the
+	// authenticated context's, there is no tenant parameter). Redacted projection; see tenant_operating_basis_read_handlers.go.
+	mux.Handle("GET /v1/admin/tenant/operating-bases",
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermOperatingBasisTenantRead)(newListOwnOperatingBasesHandler(deps)))))
+	mux.Handle("GET /v1/admin/tenant/operating-bases/{basisID}",
+		staffRoute(deps, stepUpNone, auth.RequireTenantScope(auth.RequirePermission(auth.PermOperatingBasisTenantRead)(newGetOwnOperatingBasisHandler(deps)))))
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/jurisdiction-configs",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListTenantJurisdictionConfigsHandler(deps))))
 	mux.Handle("POST /v1/admin/licences",
 		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newCreateLicenceHandler(deps))))
+
+	// --- Licence lifecycle (licensing slice 1, migration 0176) ---
+	//
+	// PLATFORM-ONLY, PermJurisdictionRegistryManage, step-up critical on every write. Single actor in this slice
+	// (maker-checker for widening changes is slice 2); the licence id comes from the path.
+	mux.Handle("PUT /v1/admin/licences/{licenceID}/status",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newSetLicenceStatusHandler(deps))))
+	mux.Handle("PUT /v1/admin/licences/{licenceID}/validity-dates",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newSetLicenceValidityDatesHandler(deps))))
+	mux.Handle("PUT /v1/admin/licences/{licenceID}/review-due",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newSetLicenceReviewDueHandler(deps))))
+	mux.Handle("PUT /v1/admin/licences/{licenceID}/evidence-reference",
+		staffRoute(deps, stepUpCritical, auth.RequirePermission(auth.PermJurisdictionRegistryManage)(newSetLicenceEvidenceReferenceHandler(deps))))
+	mux.Handle("GET /v1/admin/licences/{licenceID}/versions",
+		staffRoute(deps, stepUpNone, auth.RequirePermission(auth.PermJurisdictionRegistryRead)(newListLicenceVersionsHandler(deps))))
 
 	// --- Tenant-scoped resolution-active fact (item B-6) ---
 
