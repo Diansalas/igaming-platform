@@ -1,0 +1,15 @@
+{
+ "name": "race-policy-churn",
+ "version": 1,
+ "seed": 42,
+ "description": "(g) worker drains while a policy version is inserted every 400 ms (90 s)",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 20
+ },
+ "window_secs": 90,
+ "extra": {
+  "policy_every_ms": 400
+ },
+ "seed_scenario": "race-2k"
+}

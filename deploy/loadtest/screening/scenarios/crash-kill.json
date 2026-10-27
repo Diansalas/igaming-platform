@@ -1,0 +1,15 @@
+{
+ "name": "crash-kill",
+ "version": 1,
+ "seed": 42,
+ "description": "(f) SIGKILL the worker (by pid) inside a provider call (8 s latency) holding 4 claims; restart after 5 s; default lease 120 s",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 8000
+ },
+ "extra": {
+  "restart_delay_secs": 5,
+  "observe_secs": 420
+ },
+ "seed_scenario": "crash-500"
+}

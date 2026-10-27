@@ -1,0 +1,15 @@
+{
+ "name": "race-control",
+ "version": 1,
+ "seed": 42,
+ "description": "(g) control: same, no policy inserts",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 20
+ },
+ "window_secs": 90,
+ "extra": {
+  "policy_every_ms": 0
+ },
+ "seed_scenario": "race-2k"
+}

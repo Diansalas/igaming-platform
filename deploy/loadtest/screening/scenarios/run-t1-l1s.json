@@ -1,0 +1,15 @@
+{
+ "name": "run-t1-l1s",
+ "version": 1,
+ "seed": 42,
+ "description": "(c) RunPass on fleet t1 with the MOCK provider latency l1s; 3 passes, each capped at 150 s",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 1000
+ },
+ "passes": 3,
+ "extra": {
+  "pass_cap_secs": 150
+ },
+ "seed_scenario": "pass-t1"
+}

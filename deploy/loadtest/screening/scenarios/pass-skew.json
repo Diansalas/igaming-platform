@@ -1,0 +1,30 @@
+{
+ "name": "pass-skew",
+ "version": 1,
+ "seed": 42,
+ "description": "RunPass fleet skew (seed only): [{\"count\": 1, \"persons\": 200000}, {\"count\": 99, \"persons\": 1000}], backlog mix",
+ "tenant_groups": [
+  {
+   "count": 1,
+   "persons": 200000
+  },
+  {
+   "count": 99,
+   "persons": 1000
+  }
+ ],
+ "mix": {
+  "clear": 0.7,
+  "stale": 0.15,
+  "legacy": 0.03,
+  "needs_officer": 0.01,
+  "held": 0.01,
+  "pending": 0.0
+ },
+ "policy_versions": 3,
+ "passes": 3,
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 0
+ }
+}

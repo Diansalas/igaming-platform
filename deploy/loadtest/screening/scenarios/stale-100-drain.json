@@ -1,0 +1,16 @@
+{
+ "name": "stale-100-drain",
+ "version": 1,
+ "seed": 42,
+ "description": "(d) list added on 100 persons, default config: full drain to zero denied, no concurrent callers",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 100
+ },
+ "window_secs": 900,
+ "extra": {
+  "event": "list_added",
+  "stop_when_cleared": true
+ },
+ "seed_scenario": "stale-100"
+}

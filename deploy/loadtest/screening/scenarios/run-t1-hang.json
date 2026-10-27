@@ -1,0 +1,16 @@
+{
+ "name": "run-t1-hang",
+ "version": 1,
+ "seed": 42,
+ "description": "(c) RunPass on fleet t1 with the MOCK provider latency hang; 3 passes, each capped at 150 s",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 0,
+  "hang_rate": 1.0
+ },
+ "passes": 3,
+ "extra": {
+  "pass_cap_secs": 150
+ },
+ "seed_scenario": "pass-t1"
+}

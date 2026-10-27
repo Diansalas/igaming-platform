@@ -1,0 +1,15 @@
+{
+ "name": "run-t10-l100",
+ "version": 1,
+ "seed": 42,
+ "description": "(c) RunPass on fleet t10 with the MOCK provider latency l100; 3 passes, each capped at 150 s",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 100
+ },
+ "passes": 3,
+ "extra": {
+  "pass_cap_secs": 150
+ },
+ "seed_scenario": "pass-t10"
+}

@@ -1,0 +1,22 @@
+{
+ "name": "growth-v1000",
+ "version": 1,
+ "seed": 42,
+ "description": "measurement (b): 1000 screening policy versions per tenant/jurisdiction, 1 tenant x 1000 persons",
+ "tenant_groups": [
+  {
+   "count": 1,
+   "persons": 1000
+  }
+ ],
+ "mix": {
+  "clear": 0.7,
+  "stale": 0.15,
+  "legacy": 0.03,
+  "needs_officer": 0.01,
+  "held": 0.01,
+  "pending": 0.0
+ },
+ "policy_versions": 1000,
+ "reps": 5
+}

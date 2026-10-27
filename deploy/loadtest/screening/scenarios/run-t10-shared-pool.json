@@ -1,0 +1,17 @@
+{
+ "name": "run-t10-shared-pool",
+ "version": 1,
+ "seed": 42,
+ "description": "(i) 10 tenants, 100 ms provider, 20 closed-loop gate callers sharing the worker's 10-connection runtime pool",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 100
+ },
+ "passes": 3,
+ "bg_gate": 20,
+ "extra": {
+  "pass_cap_secs": 150,
+  "shared_pool": 1
+ },
+ "seed_scenario": "pass-t10"
+}

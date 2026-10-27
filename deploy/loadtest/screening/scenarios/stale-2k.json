@@ -1,0 +1,24 @@
+{
+ "name": "stale-2k",
+ "version": 1,
+ "seed": 42,
+ "description": "(d) seed: 1 tenant x 2000 persons, initial single-list policy, 97% clear",
+ "tenant_groups": [
+  {
+   "count": 1,
+   "persons": 2000
+  }
+ ],
+ "mix": {
+  "clear": 0.97,
+  "stale": 0.0,
+  "legacy": 0.0,
+  "needs_officer": 0.005,
+  "held": 0.005,
+  "pending": 0.0
+ },
+ "policy_versions": 3,
+ "extra": {
+  "initial_lists_single": 1
+ }
+}

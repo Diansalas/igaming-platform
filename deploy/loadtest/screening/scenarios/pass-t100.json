@@ -1,0 +1,26 @@
+{
+ "name": "pass-t100",
+ "version": 1,
+ "seed": 42,
+ "description": "RunPass fleet t100 (seed only): [{\"count\": 100, \"persons\": 1000}], backlog mix",
+ "tenant_groups": [
+  {
+   "count": 100,
+   "persons": 1000
+  }
+ ],
+ "mix": {
+  "clear": 0.7,
+  "stale": 0.15,
+  "legacy": 0.03,
+  "needs_officer": 0.01,
+  "held": 0.01,
+  "pending": 0.0
+ },
+ "policy_versions": 3,
+ "passes": 3,
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 0
+ }
+}

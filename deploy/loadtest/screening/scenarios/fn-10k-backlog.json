@@ -1,0 +1,25 @@
+{
+ "name": "fn-10k-backlog",
+ "version": 1,
+ "seed": 42,
+ "description": "(a) 10k persons, backlog mix (70% clear, 15% stale, 3% legacy, ...)",
+ "tenant_groups": [
+  {
+   "count": 1,
+   "persons": 10000
+  }
+ ],
+ "mix": {
+  "clear": 0.7,
+  "stale": 0.15,
+  "legacy": 0.03,
+  "needs_officer": 0.01,
+  "held": 0.01,
+  "pending": 0.0
+ },
+ "policy_versions": 3,
+ "reps": 3,
+ "extra": {
+  "cycle_budget_secs": 240
+ }
+}

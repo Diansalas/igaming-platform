@@ -1,0 +1,18 @@
+{
+ "name": "run-t10-ownerpool-gate",
+ "version": 1,
+ "seed": 42,
+ "description": "(h) 10 tenants, 100 ms provider, 8 paced gate callers on a separate owner pool + 1 keyset reader",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 100
+ },
+ "passes": 3,
+ "bg_gate": 8,
+ "bg_sweeper": 1,
+ "extra": {
+  "pass_cap_secs": 150,
+  "gate_pace_ms": 20
+ },
+ "seed_scenario": "pass-t10"
+}

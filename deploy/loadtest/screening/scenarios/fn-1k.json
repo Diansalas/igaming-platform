@@ -1,0 +1,25 @@
+{
+ "name": "fn-1k",
+ "version": 1,
+ "seed": 42,
+ "description": "measurement (a): per-function latency, 1 tenant x 1000 persons, steady-state mix (94% clear)",
+ "tenant_groups": [
+  {
+   "count": 1,
+   "persons": 1000
+  }
+ ],
+ "mix": {
+  "clear": 0.94,
+  "stale": 0.03,
+  "legacy": 0.005,
+  "needs_officer": 0.005,
+  "held": 0.005,
+  "pending": 0.0
+ },
+ "policy_versions": 3,
+ "reps": 3,
+ "extra": {
+  "cycle_budget_secs": 240
+ }
+}

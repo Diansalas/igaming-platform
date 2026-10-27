@@ -1,0 +1,21 @@
+{
+ "name": "retry-300",
+ "version": 1,
+ "seed": 42,
+ "description": "(e) seed: 1 tenant x 300 persons, backlog mix",
+ "tenant_groups": [
+  {
+   "count": 1,
+   "persons": 300
+  }
+ ],
+ "mix": {
+  "clear": 0.7,
+  "stale": 0.15,
+  "legacy": 0.03,
+  "needs_officer": 0.01,
+  "held": 0.01,
+  "pending": 0.0
+ },
+ "policy_versions": 3
+}

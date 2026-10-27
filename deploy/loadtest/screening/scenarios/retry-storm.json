@@ -1,0 +1,16 @@
+{
+ "name": "retry-storm",
+ "version": 1,
+ "seed": 42,
+ "description": "(e) provider fails 100% for 240 s then recovers; 30% of subjects fail on every attempt; default retry config; 600 s",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 50,
+  "fail_persist": 0.3
+ },
+ "window_secs": 600,
+ "extra": {
+  "outage_secs": 240
+ },
+ "seed_scenario": "retry-300"
+}

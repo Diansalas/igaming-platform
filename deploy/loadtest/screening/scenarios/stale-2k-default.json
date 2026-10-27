@@ -1,0 +1,15 @@
+{
+ "name": "stale-2k-default",
+ "version": 1,
+ "seed": 42,
+ "description": "(d) list added on 2000 persons, default worker config, no concurrent callers, 300 s window",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 100
+ },
+ "window_secs": 300,
+ "extra": {
+  "event": "list_added"
+ },
+ "seed_scenario": "stale-2k"
+}
