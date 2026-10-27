@@ -601,164 +601,207 @@ Serialisation results (READ COMMITTED):
 
 ## 5. Item 3: trust boundaries
 
-### 5.1 Every path that could enable a gate, and why it cannot without authorisation
+### 5.1 Every path that could enable a gate (or block a gate-off)
 
-The "today" column is verified at `01ea296`. The "after" column is this design.
-
-| # | Path | Actor | Today | After this design |
+| # | Path | Actor | Today | After v2.1 |
 |---|---|---|---|---|
-| P1 | `POST .../screening/trigger-policy`, then `SetScreeningTriggerPolicy`, then `aml_screening_trigger_policy_author` | officer (runtime role) | enables a gate in development, staging and test with a quorum, a proof and a heartbeat (F7) | the guard (s4.1) refuses new enabling without C(T,J), a current instance attestation, a worker attestation, settings, no freeze and integrity |
-| P2 | Direct `INSERT INTO aml_screening_trigger_policies` | runtime | `42501`: no table privilege (`0181:829-831`, re-asserted by `deploy/init-app-role.sql`) | unchanged; the guard would apply too |
-| P3 | `aml_screening_trigger_policy_set` (owner setter) | runtime | `42501` since `0191:236-243` | unchanged |
-| P4 | `aml_screening_trigger_policy_set` or hand-written INSERT | **owner** | allowed in development, staging and test (F6) | **refused by the guard** (fires for the owner). Bypass needs DDL (s5.5) |
-| P5 | `screening_trigger_loosen_apply` | runtime, two Persons | never enables (F8) | unchanged, plus guard step 8 |
-| P6 | New executors (`screening_gate_*_apply`) | runtime, governed | n/a | they write only evidence tables and **never** `aml_screening_trigger_policies` (writer pin, A-9) |
-| P7 | Forge heartbeat (`screening_worker_heartbeat`) | runtime, proof-less (F2) | satisfies the heartbeat precondition | not enough: new enabling also needs an attestor-written `screening_worker_attestations` row (s5.3) |
-| P8 | Forge `app.environment` GUC | any session | irrelevant: the anchor is used (F1) | unchanged |
-| P9 | Write `database_environment` | runtime | no (SELECT only, `0135:1371-1377`) | unchanged |
-| P10 | Write evidence tables directly | runtime | n/a | no privilege; FORCE RLS; admission guards refuse anything not written by an executor of an executed request **of this transaction** (LC040 pattern, `0191:75-127`) |
-| P11 | Call an executor with no executed request | runtime | n/a | LC040 `licensing change: no executed ... request of this transaction and actor` |
-| P12 | Mint two-Person approvals | **compromised API process** | the process holds the actor-proof signing keys (`cmd/platform-api/main.go:250`, ADR 0110) and can sign as any staff | **same residual** (R-5): the two-Person rule does not resist full compromise of the API process. Compensation: every authorisation raises `aml.screening_gate_attention` (`authorisation_created`, p3) to an out-of-band channel; audit with IP and session; external log shipping |
-| P13 | Insert an instance or worker attestation | runtime | n/a | no EXECUTE on the attest functions; they require `session_user` to be a member of `igaming_gate_attestor` and **not** of the owner role |
-| P14 | Disable, replace or drop the guard; `NO FORCE` RLS; TRUNCATE after disabling the deny trigger | **owner** | possible (owner of the objects) | **still possible.** Detected, not prevented (s5.5 to s5.7) |
-| P15 | `session_replication_role = replica` | owner | not settable: superuser-only parameter (PGC_SUSET), unless `GRANT SET ON PARAMETER` (PG15+). The manifest pins that `pg_parameter_acl` grants nothing (s5.6 D4) | the guard and append-only triggers are `ENABLE ALWAYS` and fire in replica mode too |
-| P16 | Anything | **superuser** | everything | everything. Detection only by logs the database cannot edit (D5) |
+| P1 | trigger-policy route → `aml_screening_trigger_policy_author` | officer (runtime role) | enables in development, staging and test (F7) | the guard requires settings, attestation, worker attestation, C(T,J), no freeze, integrity, the same screening policy, and the cap |
+| P2 | direct INSERT | runtime | `42501` | unchanged |
+| P3 | owner setter via runtime | runtime | `42501` | unchanged |
+| P4 | owner setter or raw INSERT | **owner** | allowed (F6) | refused by the guard while it is enabled; bypass needs DDL (detected externally, s5.6) |
+| P5 | `screening_trigger_loosen_apply` | runtime, two Persons | never enables | unchanged; refusals are LC050 (s4.1) |
+| P6 | new executors | runtime, governed | n/a | never write the policy table (A-9) |
+| P7 | forged heartbeat | runtime | satisfies the precondition | insufficient: a worker attestation bound to the current instance attestation is required |
+| P8, P9 | `app.environment` GUC; anchor writes | any / runtime | irrelevant / no | unchanged |
+| P10, P11 | evidence writes; executor without an executed request | runtime | n/a | no privilege; LC040 admission |
+| P12 | minting two-Person approvals | **compromised API process** (it holds the actor-proof keys, `main.go:250`) | possible | **same residual R-5**; out-of-band `authorisation_created` alert; KMS follow-up (OD-G12) |
+| P13 | attestations | runtime; owner | n/a | attestor-role membership required, owner excluded, primary only |
+| P14 | DISABLE, replace or drop guards; `NO FORCE`; TRUNCATE after disable | **owner** | possible | still possible; detected only by external controls (s5.6) |
+| P15 | `session_replication_role = replica` | owner / superuser | owner: no (superuser-only parameter; the manifest pins `pg_parameter_acl`) | superuser: deny triggers still fire (`ALWAYS`); insert guards do not (ORIGIN, s5.5); detected by D5 `misc_set` and by reconcile `gate_unexplained` |
+| P16 | anything | superuser | everything | detection outside the database only |
+| P17 (new) | **staging owner = RDS master** (F16), which has CREATEROLE and `rds_superuser`; it can grant itself attestor or break-glass membership | owner in staging | possible | refused by the role-separation check (s5.5); Tier S/N decision (s19) |
+| P18 (new) | squatting on advisory keys to block the author or **the governed gate-off** | any session | possible (security H1) | removed: lock rows only (s4.9). Residual: holding a row via an open transaction, bounded by `idle_in_transaction_session_timeout` |
 
-### 5.2 SECURITY DEFINER functions the runtime role can execute that write the policy or evidence tables (catalogue test)
+### 5.2 Catalogue pins (writers, exposure, prefix loop)
 
-The `tableWriters` detector (`internal/aml/screening_d7_integration_test.go:101-152`: direct DML, dynamic EXECUTE, transitive
-callers) is extended with one pinned allow-list per table. A new runtime-executable writer then fails CI until a recorded
-decision changes the pin:
+- **Trigger-aware writer detector** (security L4, F15). `tableWriters` is extended so that a function writing table X also counts as a
+  writer of every table Y written by a trigger function on X (closure over `pg_trigger`). Without this, the chain trigger on the policy
+  table, which writes `screening_gate_evidence_chain`, would be invisible.
+- Pinned runtime-executable writers (exact sets):
 
-| Table | Exact runtime-executable writers after the design |
+| Table | Writers |
 |---|---|
-| `aml_screening_trigger_policies` | `aml_screening_trigger_policy_author`, `screening_trigger_loosen_apply` (**unchanged**, F15) |
+| `aml_screening_trigger_policies` | `aml_screening_trigger_policy_author`, `screening_trigger_loosen_apply` (**unchanged**) |
 | `aml_screening_policies` | `aml_screening_policy_author`, `screening_policy_loosen_apply` (unchanged) |
 | `screening_gate_settings` | `screening_gate_settings_apply` |
 | `screening_gate_authorisations` | `screening_gate_authorise_apply`, `screening_gate_adopt_apply` |
 | `screening_gate_revocations` | `screening_gate_revoke_apply` |
-| `screening_gate_instance_attestations`, `screening_worker_attestations`, `screening_gate_activation_freezes`, `screening_gate_cutover`, `screening_gate_legacy_inventory` | **none** |
-| `screening_gate_evidence_chain` | **none directly** (written by chain trigger functions, which have no runtime EXECUTE). The detector's transitive closure must list exactly the apply functions above plus the two policy writers. The test asserts that set |
-| `screening_worker_heartbeats` | `screening_worker_heartbeat` (unchanged; phase 2 moves it, s5.3) |
+| `screening_gate_freeze_lifts` | `screening_gate_freeze_lift_apply` |
+| `screening_gate_evidence_chain` | the union of the rows above plus the two policy writers (through triggers) |
+| `screening_gate_locks` | every runtime-executable function that locks (through `screening_gate_lock`): the pinned list is generated from the s4.9 table and asserted exactly |
+| attestations, confirmations, freezes, cut-over, inventory | **none** |
 
-Further catalogue assertions (A-9): each new table has `relforcerowsecurity`, no ACL entry for `igaming_runtime` or PUBLIC, and its deny
-and guard triggers present with `tgenabled = 'A'`. Every new function has `proconfig` containing `search_path=pg_catalog, public,
-pg_temp`. The break-glass and attest functions grant EXECUTE only to their NOLOGIN role (or to nobody if the role does not exist).
+- **Exposed-function pin** (DB M4). SECURITY DEFINER assert helpers called from the classifier branches at filing time
+  (`screening_gate_authorise_assert(jsonb, timestamptz)`, `screening_gate_adopt_assert`, `screening_gate_settings_assert`,
+  `screening_gate_freeze_lift_assert`, following the 0191 `screening_trigger_loosen_assert` shape) are runtime-executable and listed
+  in this pin and in `init-app-role.sql`. They raise LC050 and write nothing (the writer pin proves it).
+- **Prefix revoke loop** (security L3). Every migration ends with a loop over `pg_proc` where the name matches `screening\_gate\_%` or
+  `screening\_worker\_attest%`. It runs `REVOKE ALL ... FROM PUBLIC` and from the runtime role, and then grants back only the
+  explicit allow-list. A new function is therefore closed by default. A catalogue test asserts the runtime-executable set equals
+  the allow-list.
+- Other pins: FORCE RLS; no ACL entry for runtime or PUBLIC on any new table; `tgenabled` per the s5.5 table; `proconfig` holds the
+  pinned `search_path` (and the hashing GUCs on hashing functions); the guard is the last BEFORE INSERT trigger.
+- **Post-suite check** (QA H-1): a test that runs last asserts every trigger in the s5.5 table has its specified `tgenabled`. It catches
+  a fixture that re-enabled with plain `ENABLE TRIGGER` and left a trigger ORIGIN where ALWAYS is required.
 
-### 5.3 Worker health cannot be spoofed into an activation prerequisite
+### 5.3 Worker health
 
-The problem (F2, F11): the heartbeat is runtime-executable and proof-less, and the worker runs in the API process under the same
-credential. **Any** secret the worker could use to sign a heartbeat is also in the API process.
-
-| Option | What it proves | Feasible now? | Decision |
-|---|---|---|---|
-| A. Owner/attestor-recorded **worker attestation** (`screening_worker_attestations`) required for new enabling, **plus** a fresh heartbeat of the same provider and synthetic flag | that a named operator stated "a worker of provider P, deployment D, serves this attested instance until T". The heartbeat proves liveness only | yes, without a provider | **Phase 1 (merge-blocking part of this design)** |
-| B. Separate worker deployment with its own LOGIN role (`igaming_screening_worker`). `screening_worker_heartbeat`, claim and finish move to that role; the runtime role loses EXECUTE on the heartbeat | that the heartbeat came from the worker credential, not the API credential | needs a process split (`main.go:799-810`) and role provisioning (out of band) | **Phase 2: activation-blocking for any staging activation that relies on real data; required before production** (OD-G9) |
-| C. HMAC-signed heartbeat with a key in the API process | nothing beyond A (same trust domain) | yes | **Rejected**: false assurance |
-| D. Provider-signed liveness (vendor signs a platform nonce) | that the vendor is reachable with the tenant's credential | no: PROVIDER DEPENDENT | future; recorded with the provider attestation design (D1-CLOSURE-1) |
-
-What spoofing still achieves under A: a runtime attacker who keeps the heartbeat fresh while the attested worker is dead can satisfy
-liveness for **new enabling only within an existing worker attestation**. The consequence is a gate without a working worker.
-That fails closed (persons held) and is detected by `aml.screening_gate_trapped` and by the parked monitors that run outside the
-worker (`0181:1625-1628`). It does not weaken AML. It harms availability and is alerted.
+Unchanged from v2 (option A, owner/attestor-written worker attestation, now **bound to the current instance attestation**: DB M5;
+option B, the worker role split, is phase 2; C rejected; D PROVIDER DEPENDENT).
 
 ### 5.4 Evidence cannot be altered by runtime roles
 
-There are no table privileges (I5). FORCE RLS with an owner-only policy. Append-only triggers (`ENABLE ALWAYS`). Insert admission
-only through executors bound to an executed licensing-change request of the same transaction, or to the attestor and break-glass
-role checks. Every row is hash-chained (s5.6). Executor outputs are audited in the same transaction (s10). Reconcile cross-checks rows
-against requests (s11).
+No privilege, FORCE RLS, append-only, admission-guarded, chained, audited, reconciled.
 
-### 5.5 Table owner and superuser: an honest account
+### 5.5 Owner and superuser; role separation; ALWAYS vs ORIGIN; logical replication
 
-**Triggers, RLS and append-only rules do not bind a determined owner or superuser.** What each can do against this design:
+**Honest capability table:** unchanged from v2. The owner can disable or replace triggers and functions, turn off FORCE RLS, rebuild the
+chain, and read the actor-proof keys. The superuser can do everything. In-database controls therefore protect against runtime roles
+and accidents only.
 
-| Capability | Owner `igaming` (NOSUPERUSER, F16) | Superuser |
+**Role separation (security H3; G5).** Required for any environment that has a settings row (that is, anywhere activation is possible):
+- The owner role is NOSUPERUSER, NOCREATEROLE and **not** a member of `rds_superuser`. **Staging must stop defaulting
+  `DB_OWNER_USER` to the RDS master** (F16): a separate owner role is created by the role administrator.
+- The attest functions and every governed executor refuse with `gate_role_separation_violated` when any of these holds:
+  - the owner role has `rolcreaterole`, `rolsuper` or `rolbypassrls`;
+  - the owner role is a member of `rds_superuser` (checked only if that role exists);
+  - `session_user` (the API login, for executors) is a member of the owner role;
+  - an attestor or break-glass member is also an owner member.
+
+  These are catalogue reads (`pg_roles`, `pg_auth_members`).
+- `internal/db/production_safety.go` `VerifyRuntimeRoleInProduction` (`:115-167`) is extended into
+  `VerifyRuntimeRoleSeparation`. It runs **for production and for any anchor where `screening_gate_settings` has a row** (read through an
+  owner-only definer function `screening_gate_settings_present()` that is runtime-executable and returns a boolean). In those
+  environments it refuses to start if the runtime role owns tables or has memberships.
+
+**`ENABLE ALWAYS` vs ORIGIN (resolves security H3 against DB H5).** PostgreSQL's logical-replication apply worker runs with
+`session_replication_role = replica`. ALWAYS triggers fire there; ORIGIN triggers do not. RDS blue/green major upgrades use logical
+replication, so this matters.
+
+| Trigger | Mode | Why |
 |---|---|---|
-| `ALTER TABLE ... DISABLE TRIGGER` / `DROP TRIGGER` on its tables | **yes** | yes |
-| `CREATE OR REPLACE FUNCTION` (replace the guard or an executor) | **yes** | yes |
-| `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` / `DISABLE ROW LEVEL SECURITY` | **yes** | yes |
-| `TRUNCATE` / `DELETE` evidence (after disabling the deny trigger) | **yes** | yes |
-| Insert a fake authorisation or attestation (after disabling the admission guard) | **yes** | yes |
-| Rebuild the hash chain consistently after tampering | **yes** (owns the chain table) | yes |
-| Read actor-proof keys (`actorproof_private`, `0166`) and forge proofs | **yes** (owner of the schema) | yes |
-| `SET session_replication_role` | no (superuser parameter; manifest pins no `GRANT SET ON PARAMETER`) | yes |
-| Edit `pg_catalog` directly; `ALTER SYSTEM`; load extensions; `COPY ... PROGRAM` | no | yes |
-| Create, alter or disable an **event trigger** | no (`CREATE EVENT TRIGGER` and ownership need superuser in PG16) | yes |
-| Change roles and memberships | no (NOCREATEROLE) | yes |
-| Avoid server logs shipped elsewhere | no | can change logging settings (itself logged before it takes effect, if shipping is synchronous); cannot edit what was already shipped |
+| deny triggers (UPDATE, DELETE, TRUNCATE) on every evidence table; `aml_screening_trigger_policies_append_only`, `_no_truncate`; `database_environment_no_truncate` | **ALWAYS** | append-only tables never replicate an UPDATE, DELETE or TRUNCATE (the publisher refuses them), so ALWAYS never blocks a legitimate apply, and it stops a replica-mode bypass |
+| insert guards: `aml_screening_trigger_policies_10_guard`, `_99_activation_guard`, every evidence admission guard, `database_environment_guard` (it guards INSERT, UPDATE and DELETE in one function) | **ORIGIN** (unchanged default) | on a subscriber the apply worker has no session actor and no executed request, so ALWAYS insert guards would break replication. Replica mode is superuser-only (P15); a bypass is detected by `gate_unexplained` and by D5 |
+| chain triggers (AFTER INSERT) | **ORIGIN** | a subscriber receives the chain rows as data; firing locally would double-append |
 
-So the in-database controls protect against **runtime roles and accidents**. Against the owner they provide **detection**, and
-against the superuser **detection outside the database**.
+**Stance on logical replication of these tables:** allowed only as **whole-database replication for an upgrade or migration**,
+never as partial publication. The subscriber is a new instance, so it needs re-attestation, and identity-bound authorisations
+classify `identity_mismatch` after switchover and need adoption (s3.7). A catalogue test pins the modes above.
+`database_environment_guard` stays ORIGIN, as now (changing its UPDATE/DELETE half would need splitting the function; recorded as a
+follow-up, DB L-note).
 
-### 5.6 Independent detection controls
+### 5.6 Detection controls: independence stated honestly (security M6, operations H1/H2/H3/M6)
 
-| ID | Control | Defeats | Defeated by | Status in this design |
-|---|---|---|---|---|
-| D1 | **DDL event trigger** (`ddl_command_end`, `sql_drop`, `table_rewrite`) writing to schema `ddl_audit`, owned by NOLOGIN `igaming_ddl_audit_owner`. Function SECURITY DEFINER of that role; the owner has no privilege on the schema. It records `txid_current()`, `session_user`, `current_user`, `inet_client_addr()`, `application_name`, command tag, `object_identity`. Reconcile flags any event on a guarded object whose txid did not also record a `schema_migrations` row (`ddl_outside_migration`, p1). | owner DDL (DISABLE TRIGGER, CREATE OR REPLACE, NO FORCE RLS, DROP, GRANT/REVOKE) | superuser (can disable it); does **not** capture TRUNCATE, DML, role changes (global objects), SET or ALTER SYSTEM | **must be provisioned by a superuser out of band** (F21). Script `deploy/security/ddl-audit.sql` is a follow-up deliverable. Its absence is reported as `ddl_audit_missing` (p1 in staging/production, p3 in development/test). Not creatable by migrations |
-| D2 | `ENABLE ALWAYS` on the guard, the admission guards and the deny triggers | `session_replication_role = replica` | owner `DISABLE TRIGGER` (caught by D1) | in the migrations. Data-only restores of these tables are unsupported. The backup tooling already bans `--disable-triggers` (`deploy/backup/backup_static_test.go:84`). Full `pg_dump` restores load data before creating triggers, so they are unaffected |
-| D3 | **Hash chain** `screening_gate_evidence_chain(seq bigint GENERATED ALWAYS AS IDENTITY, at, source_table, source_id, txid, session_user name, current_user name, row_sha256, prev_hash, chain_hash)`. `chain_hash = sha256(prev_hash \|\| seq \|\| source_table \|\| source_id \|\| row_sha256 \|\| at)`. Appended by AFTER INSERT triggers on every evidence table **and on `aml_screening_trigger_policies`**. Genesis row written by migration 0195. `screening_gate_chain_verify() RETURNS bigint` (the first broken seq, or NULL) | silent edit or deletion of history | owner rebuilds the whole chain; superuser | in the migrations. **External anchoring of the head** (D3b): the monitor job copies `(max(seq), chain_hash)` to an external append-only store on every run; a head the store saw that no longer verifies is p1 |
-| D4 | **Catalogue manifest**: the release ships `deploy/manifest/screening-gate.manifest`, generated from a clean migrate. Lines: `FN\|regprocedure\|md5(prosrc)\|prosecdef\|proconfig\|owner\|proacl`, `TRG\|table\|name\|tgenabled\|md5(pg_get_triggerdef)`, `RLS\|table\|relrowsecurity\|relforcerowsecurity`, `ACL\|table\|relacl`, `POL\|...`, `EVT\|evtname\|evtenabled\|md5(function)`, `PARAMACL\|session_replication_role\|<acl or none>`, using the same formulas as `deploy/backup/baseline.sql:145-162`. An **external** job computes the same lines with inline SQL (never through a database function the owner could replace), using a read-only monitor credential, and diffs them | owner function or trigger replacement; ACL drift | superuser who also feeds the job false data (needs the job's host) | tooling is a follow-up deliverable. An in-database **tripwire** `screening_gate_catalogue_check()` compares against `screening_gate_catalogue_baseline` (written by the migration). It catches accidents only and makes `screening_gate_authorise_apply` refuse `gate_guard_not_intact` |
-| D5 | **pgaudit + log shipping** (`log_connections`, `log_disconnections`, `pgaudit.log = 'ddl, role, write'` for the owner role, `misc_set` for `session_replication_role`) to a store the database owner and the cloud database admin cannot edit (separate IAM, WORM retention) | owner and superuser actions, including event-trigger removal | compromise of the logging account | **operational requirement. NOT available or verified in this sandbox.** Activation-blocking for production (s16) |
-| D6 | **Role separation**: `igaming` (migration only, credential reachable only from the migration pipeline), `igaming_runtime` (app), `igaming_backup` (BYPASSRLS read), `igaming_gate_attestor` and `igaming_gate_breakglass` (NOLOGIN, membership time-boxed to named operator logins), `igaming_ddl_audit_owner` (NOLOGIN), cloud superuser (break-glass of the cloud provider, MFA) | one credential doing everything | collusion | role provisioning is human-run (incident 2026-09-27 rule). Absent attestor role means activation is impossible (fails closed) |
-| D7 | **Alert on owner login** outside a declared migration window (from D5 logs). PG17's `login` event trigger could add an in-database signal later; the sandbox is PG16 | silent owner sessions | log tampering (D5 covers) | operational requirement |
-| D8 | **Key custody**: actor-proof keys are in the API config (`main.go:250`) and in `actorproof_private` (owner). Move signing to a KMS or HSM with per-Person keys (an ADR 0110 follow-up) | proof forgery by owner or API compromise (R-5) | KMS admin compromise | out of scope here; recorded residual and owner decision OD-G12 |
+| ID | Control | Independent of the owner? | Independent of the API process? |
+|---|---|---|---|
+| in-DB | tripwire, chain verify, reconcile, monitor summary, run by the in-process monitor | **no** (the owner can replace them) | **no** (the monitor runs in the API process, F11) |
+| D1 | DDL event trigger (superuser-provisioned, owned by `igaming_ddl_audit_owner`) | yes against the owner; no against the superuser | yes (fires in the database, not in the API process) |
+| D3b | **external verifier job** (separate host and credential, client-side recomputation) | yes, as long as its external store is outside the owner's reach | yes |
+
+**D3b.** A separate host or job runs under a dedicated read-only `igaming_gate_verifier` role (BYPASSRLS, SELECT only, like
+`igaming_backup`, F17, so FORCE RLS cannot hide rows). It:
+- reads the raw chain and evidence rows and **recomputes every hash client-side** (its own code, never `screening_gate_chain_verify()`);
+- compares against the heads it stored previously in an external append-only store;
+- computes the catalogue manifest lines (D4) with inline SQL.
+
+The chain is **two streams**: a per-(T,J) policy stream serialised by `policy:<T>:<J>`, and `chain:evidence` for configuration events.
+Each row carries `prev_hash` of its own stream. Ordering is by `seq` with **gaps allowed**: verification follows `prev_hash` links
+and never assumes contiguous seq (security M4). The in-process monitor verifies **incrementally** from a watermark (operations H3).
+The watermark is advisory, because the runtime role could reset it. The external job always verifies in full.
+
+**D1.**
+- Correlation with migrations: 0195 adds `schema_migrations.txid bigint DEFAULT txid_current()` (no Go change needed: the runner's
+  INSERT runs inside the migration transaction, F22; a Go test pins that the recorded txid equals the transaction's).
+- Correlation is decided **outside the database**: the verifier compares DDL events against the deployment pipeline's own records
+  (the release id, migration versions and time window from the CI/CD log). A matching `schema_migrations` row alone can be forged by the owner.
+- **Declared windows** for routine non-migration DDL (operations H2): `init-app-role.sql` re-asserting REVOKE/GRANT, post-restore
+  grants, rekey. The pipeline records `{window_id, start, end, purpose}` externally before running. Events inside a declared window
+  are p3 (logged). Outside one, they are p1 `ddl_outside_migration`.
+- `ddl_audit_missing` is p3 until event triggers are proven feasible on RDS (operations H2); Tier N makes it p1 (s19; security disagrees with p3 for staging).
+
+**D4 manifest (operations M6):**
+- Owned by `security`. Generated in CI from a clean migrate of the release commit and signed with the release signing key.
+- Regenerated only by a release.
+- Scope: every `screening_gate_*` object, the policy-table triggers, the **gate predicate functions (I1 set) and the monitor functions**,
+  ACLs, `pg_parameter_acl`, and the event triggers.
+
+**D5 (log shipping and pgaudit), D6 (role separation, above), D7 (owner-login alerts), D8 (key custody):** as v2. D5 is not
+available in this sandbox.
+
+**Alert delivery is not yet a control (F20).** ALERT-DELIVERY-1 is OPEN and the email channel is MOCK. A p1 raised today reaches no
+human. The monitor has these failure modes and detections (operations H1):
+- **Availability** is decided by `max(version) >= 0198` in `schema_migrations`, not by function presence. If the functions are absent
+  at that version: `monitor_unavailable` (p1).
+- Each check runs in its own sub-transaction (savepoint). An exception becomes `monitor_check_failed:<problem>` (p2) and does not stop
+  the other checks.
+- Single-flight: the monitor takes `monitor:screening_gate` with `FOR UPDATE NOWAIT` and skips the pass if it is held.
+  `statement_timeout = 30s` per check.
+- **Dead-man's switch:** every pass exports `last_pass_at` and the chain head to the external store. The external job raises if no pass
+  arrives within 3 intervals.
 
 ---
 
 ## 6. Item 4: governance
 
-### 6.1 Decision: reuse the licensing-change primitive with new kinds
+### 6.1 Reuse the licensing-change primitive; approval count pinned to 2 (DB H1)
 
-**Decision (engineering, s13 E-1): reuse** `licensing_change_requests` / `licensing_change_approvals`, with four new kinds,
-following exactly the 0190 and 0191 recipe (a kind row, the classifier wrapper branch, the approvals officer trigger, an
-`*_apply` executor admitted by LC040, a Go `register()`).
+The reasons for reuse are unchanged from v2. **v2.1 correction:** `required_approvals` is stamped from the kind row at filing, and
+execution happens in the final-approval transaction (F18). A setting asking for 3 approvals is therefore **unreachable**: the
+request executes at the second approval, and an executor-side "≥ 3" refusal would only roll that approval back for ever. v2.1 **pins
+2 counted approvals** (the kind row: `widening_approvals = 2`; `approver_person_ids` cardinality = 2). The `min_approvals` setting is
+removed. Higher counts become a **future primitive change**: a per-request `required_approvals` derived at filing from the settings by
+the classifier. That change is listed (OD-G4), not designed here.
 
-Reasons:
-- It already has the closed state machine, `executed_txid` admission, approvals on the **payload hash** that are at most 24 h old by
-  **distinct Persons** (never the requester), a 72 h expiry, and signed proofs on request, approve and execute through the
-  existing `licensing_change:*` operations (F18). No new actor-proof operation or verifier branch is needed.
-- The officer requirements (in-force `aml_officer` grant, owner-scope quorum, own-licence refusal) exist as reusable functions
-  (`screening_loosening_officers_assert`, `screening_loosening_approvers_assert`, `0190:413-464`).
-- The Back Office list, approve and reject screens and the audit trail of licensing changes already exist. Only the filing form is new.
-- A table-owned workflow would duplicate about 600 lines of state machine and proof binding (more review surface, the same guarantees).
+### 6.2 The kinds (v2.1)
 
-Costs, accepted: `licensing_change_classify` gets one more wrapper branch (the rename-and-wrap rule of `0190` stands). Kinds are
-platform-only. The kind row's `widening_approvals` is static, so the owner's approval count is enforced additionally by the
-executor (`>= settings.min_approvals`).
+| Kind | Class | Approvals | Officers | Executor; filing-time assert |
+|---|---|---|---|---|
+| `screening_gate_authorise` | widening | 2 (pinned) | requester, both approvers, executor: in-force `aml_officer` on T + owner-scope quorum | `screening_gate_authorise_apply`; `screening_gate_authorise_assert` |
+| `screening_gate_adopt` | widening | 2 | same | `screening_gate_adopt_apply`; `screening_gate_adopt_assert` |
+| `screening_gate_revoke` | narrowing | 0 | none (any platform_admin) | `screening_gate_revoke_apply` |
+| `screening_gate_settings_configure` | widening if first or looser, else narrowing | 2 / 0 | platform_admin holding any in-force `aml_officer` grant | `screening_gate_settings_apply`; `screening_gate_settings_assert` |
+| `screening_gate_freeze_lift` (new) | widening | 2 | same as settings | `screening_gate_freeze_lift_apply`; `screening_gate_freeze_lift_assert` |
 
-### 6.2 The kinds
+**Authorise payload (security M5, M8; ledger L-5):** `{tenant_id, jurisdiction_id, validity_seconds, capacity_report_reference,
+capacity_report_sha256, capacity_accepted_persons_max, compliance_reference, legal_review_reference, evidence_reference,
+environment, system_identifier, database_oid, instance_attestation_id, cutover_nonce, screening_policy_id,
+persons_held_on_enable_preview}`.
+- Approvers' proofs bind all of these through the payload hash.
+- `persons_held_on_enable_preview` is the number of persons who would be held as soon as the gate is enabled. The filer reads it from a
+  read-only preview `screening_gate_enable_preview(T, J)`, which counts persons not covered by the in-force screening policy, ignoring the
+  backfill grace. The executor **recomputes** it and stores the computed value in `persons_held_on_enable`. A difference is shown to
+  approvers and audited; it is not a refusal (no invented threshold).
+- **Capacity acceptance is a head-count bound only.** It does not prove throughput (operations H3). Throughput evidence is the
+  CAPACITY plan's load test, referenced by `capacity_report_sha256`.
 
-| Kind | Classification | Approvals | Officer grants | Executor | Notes |
-|---|---|---|---|---|---|
-| `screening_gate_authorise` | always **widening** | kind row `widening_approvals = 2`, `approver_roles = {platform_admin}`; executor requires `>= settings.min_approvals` fresh counted officer approvals | requester, every counted approver and the executor: in-force platform `aml_officer` grant on T + owner-scope quorum (reuse `0190:413-464`) | `screening_gate_authorise_apply(uuid) RETURNS jsonb` | payload `{tenant_id, jurisdiction_id, validity_seconds, capacity_report_reference, capacity_report_sha256, capacity_accepted_persons_max, compliance_reference, legal_review_reference, evidence_reference, environment, system_identifier}`. All keys required (null where the settings allow). Approvers sign over the environment and instance identity |
-| `screening_gate_adopt` | always widening | as above | as above | `screening_gate_adopt_apply(uuid)` | payload as above plus `policy_id`, `policy_row_sha256` (s3.6) |
-| `screening_gate_revoke` | always **narrowing** | 0: executes when filed | none (any platform_admin; fail-safe) | `screening_gate_revoke_apply(uuid)` | s4.4 |
-| `screening_gate_settings_configure` | widening iff it is the first row for the environment, or any parameter becomes looser (longer validity or ages, fewer approvals, a requirement switched off); otherwise narrowing | widening: 2 Persons, officer grants **not tenant-bound**: `platform_admin` holding any in-force `aml_officer` grant (OD-G4 may require more) | | `screening_gate_settings_apply(uuid)` | payload = every settings column + `evidence_reference` (the owner decision id); no default for any field |
+**Execute-phase validation:** v2's list, with these changes:
+- The executor sets `app.tenant_id = T` before the persons count and asserts it (security H2).
+- `validity_seconds >= 3600` (the engineering floor) and `<= max_validity_seconds`.
+- Instance identity, `cutover_nonce`, `instance_attestation_id` (current) and `screening_policy_id` (in force) must all equal live.
+- Role separation (s5.5).
+- `gate_authorisation_revoked_before_execution` (s4.4).
+- Counted approvals: exactly the 2 fresh distinct officer Persons, with the existing codes.
+- `0196` down restores the 0191 classifier wrapper and the approvals-officer trigger **byte for byte** (DB M4).
 
-Execute-phase validation (re-run under K3 and K4, never trusting the request phase):
-- tenant and jurisdiction exist; J is in `aml_screening_jurisdictions(T)`; the tenant is configured for J (`tenant_jurisdiction_configs`, as `0191:206-224`)
-- the tenant's owner scope is `platform`; otherwise `gate_authorisation_not_supported_for_tenant_licensing_model` (own-licence tenants are out of scope until OD-G5; the licensing model is not changed)
-- the anchor is not production or unrecorded (`gate_authorisation_environment_refused`), and payload `environment` = anchor and `system_identifier` = live (`gate_authorisation_environment_mismatch` / `gate_authorisation_identity_mismatch`)
-- a settings row for the environment exists (`gate_authorisation_not_configured`), and `validity_seconds <= max_validity_seconds` (`gate_authorisation_duration_exceeds_configured_maximum`)
-- capacity and compliance fields are present when required (`gate_capacity_report_required`, `gate_compliance_reference_required`), and the current persons count is `<= capacity_accepted_persons_max` when a cap is required (`gate_capacity_exceeded`)
-- a current instance attestation exists (`gate_instance_attestation_missing`); for activation, a current worker attestation (`gate_worker_attestation_missing`)
-- no revocation of (T, J) with `authorisation_id IS NULL` was created after the request (`gate_authorisation_revoked_before_execution`)
-- no instance integrity problem (`gate_integrity_unresolved`), and the tripwire passes (`gate_guard_not_intact`)
-- the approvals: fresh, distinct Persons, officers, `>= min_approvals` (`officer_grant_required`, `officer_quorum_not_met`, reusing the existing codes; `gate_approvals_below_configured_minimum`)
+### 6.3 Owner parameters
 
-### 6.3 Owner parameters (no shipped value; absent means refuse)
-
-Stored in `screening_gate_settings` and written only by `screening_gate_settings_configure`. The values and options are listed
-in s12. Nothing else in the design carries a business or legal value. The remaining numbers are structural or engineering
-bounds already in the codebase (10-minute heartbeat age `0181:730`, 24 h approval freshness and 72 h request expiry `0177`,
-30-day effective window `0191:163`), each named as such.
+These are stored in `screening_gate_settings`, with no value shipped. The `tier` column records the owner's tier decision (s19). The
+structural and engineering bounds are named as such: the 3600 s minimum validity, the 72 h freeze cap fallback, the 15-minute drill
+freeze, the 10-minute heartbeat age, and the 5 s `lock_timeout`.
 
 ### 6.4 Audit and signed evidence
 
-Every executor writes its audit row in the same transaction (the `auditLoosening` pattern, `screening_loosening_kinds.go`, last function)
-and a chain row (D3). The proofs of request, approval and execution are the licensing-change proofs (bound to the payload hash),
-so the approvers' signatures cover the instance identity and the capacity report digest.
+Unchanged, plus audit events for freeze lifts and confirmations (s10).
 
 ---
 
