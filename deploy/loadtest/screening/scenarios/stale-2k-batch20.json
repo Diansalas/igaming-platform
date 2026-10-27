@@ -7,7 +7,7 @@
   "dist": "fixed",
   "latency_ms": 100
  },
- "window_secs": 300,
+ "window_secs": 180,
  "claim_batch": 20,
  "extra": {
   "event": "list_added",

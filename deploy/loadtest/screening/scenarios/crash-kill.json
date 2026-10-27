@@ -9,7 +9,7 @@
  },
  "extra": {
   "restart_delay_secs": 5,
-  "observe_secs": 420
+  "observe_secs": 210
  },
  "seed_scenario": "crash-500"
 }
