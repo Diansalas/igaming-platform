@@ -5,6 +5,8 @@
 -- literals taken from the generated data. Run as the table owner on a PRIVATE scratch database with the tenant setting applied.
 \set ON_ERROR_STOP on
 \pset pager off
+\pset format unaligned
+\pset tuples_only on
 \timing off
 SELECT id AS tid FROM tenants WHERE status = 'active' ORDER BY created_at, slug LIMIT 1 \gset
 SELECT set_config('app.tenant_id', :'tid', false) \gset
@@ -17,5 +19,7 @@ SELECT count(*) AS npersons FROM (SELECT DISTINCT person_id FROM player_accounts
 SELECT count(*) AS nversions FROM aml_screening_policies WHERE tenant_id = :'tid' AND licensing_jurisdiction_id = :'jur' \gset
 SELECT count(*) AS nrequests FROM aml_screening_requests WHERE tenant_id = :'tid' \gset
 \echo 'persons=' :npersons ' screening_policy_versions=' :nversions ' requests=' :nrequests
+-- warm the buffers: the scratch database was just cloned, so shared_buffers are cold
+SELECT aml_screening_gate_overdue(:'tid', 5000) AS warm_up \gset
 SHOW work_mem;
 SHOW shared_buffers;

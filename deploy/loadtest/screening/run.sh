@@ -7,6 +7,7 @@
 #                                      for each run: clone capa_seed_<seed-scenario|scenario> -> capa_<mode>_<scenario>, run the
 #                                      mode (fn|growth|runpass|stale|retry|crash|race), write results/<scenario>.<mode>.runN.json, drop the clone
 #   run.sh explain <scenario> <sqlfile>  clone, run an explain/*.sql file with psql, drop
+#   run.sh explain-src <capa_db> <sqlfile>  same, cloning any capa_* database
 #   run.sh drop-all                   drop every capa_* database this harness created
 #
 # Required environment (existing dev/CI harness variables, never defaulted, never printed):
@@ -65,6 +66,10 @@ measure)
 explain)
   sc="$2"; f="$3"; db="capa_explain_$(dbn "$sc")"; clone "capa_seed_$(dbn "$sc")" "$db"
   (cd "$(dirname "$f")" && psql "$(owner_url "$db")" -v ON_ERROR_STOP=1 -X -f "$(basename "$f")") ; dropdb "$db";;
+explain-src) # explain-src <source-db> <sqlfile>: like explain, but cloned from any capa_* database (e.g. capa_base for the randomised equivalence tests)
+  src="$2"; f="$3"; case "$src" in capa_*) ;; *) echo "source must be a capa_* database" >&2; exit 2;; esac
+  db="capa_explain_src"; clone "$src" "$db"
+  (cd "$(dirname "$f")" && psql "$(owner_url "$db")" -v ON_ERROR_STOP=1 -X ${CAPA_PSQL_ARGS:-} -f "$(basename "$f")") ; dropdb "$db";;
 drop-all)
   for d in $(admin -Atc "select datname from pg_database where datname like 'capa\_%'"); do dropdb "$d"; echo "dropped $d"; done;;
 *) sed -n 2,20p "$0"; exit 2;;

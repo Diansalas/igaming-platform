@@ -40,8 +40,8 @@ func benchGrowth(ctx context.Context, db string, sc *Scenario, run int) (any, er
 	res := map[string]any{"policy_versions": nv, "persons": tenants[0].Persons}
 	reps := sc.Reps
 	sinceAt := []struct{ name, expr string }{
-		{"since_at_oldest(all_versions_later)", `now() - make_interval(days => $3)`},
-		{"since_at_mid", `now() - make_interval(days => $3 / 2)`},
+		{"since_at_oldest(all_versions_later)", fmt.Sprintf(`now() - make_interval(days => %d)`, sc.GateFirstDaysAgo+2)},
+		{"since_at_mid", fmt.Sprintf(`now() - make_interval(days => %d)`, (sc.GateFirstDaysAgo+2)/2)},
 		{"since_at_recent_3d", `now() - interval '3 days'`},
 	}
 	for _, s := range sinceAt {
@@ -52,7 +52,7 @@ func benchGrowth(ctx context.Context, db string, sc *Scenario, run int) (any, er
 			for r := 0; r < reps; r++ {
 				d, err := timeIn(ctx, c, tid, true, func(tx pgx.Tx) error {
 					var v *int64
-					e := tx.QueryRow(ctx, `SELECT aml_screening_since($1,$2,`+s.expr+`, ARRAY['sanctions','pep'], NULL)`, tid, jur, sc.GateFirstDaysAgo+2).Scan(&v)
+					e := tx.QueryRow(ctx, `SELECT aml_screening_since($1,$2,`+s.expr+`, ARRAY['sanctions','pep'], NULL)`, tid, jur).Scan(&v)
 					last = v
 					return e
 				})
