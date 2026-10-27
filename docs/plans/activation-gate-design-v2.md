@@ -195,6 +195,11 @@ classifies `authorised`. In-database classification cannot detect that. Detectio
 D1 (DDL log, `DISABLE TRIGGER` outside a declared window), D3b (the external chain head shows evidence inserted out of band), and
 D5 (log shipping).
 
+**Non-vacuity source of truth after cut-over (DB N2).** The platform-level counts that tenant-by-tenant reads are checked against are:
+the policy-stream chain rows per (T, J) (platform-level, one per post-cut-over policy row) plus the inventory rows (pre-cut-over).
+A mismatch gives `gate_integrity_read_inconsistent` (fail closed in the guard; p1 in reconcile). The cost is O(tenants) per evaluation,
+which is acceptable for enabling and for the monitor pass. `app.tenant_id` is restored **exactly**, including the empty string.
+
 A gate row is always stricter than no row. No state is ever fixed by removing a gate automatically.
 
 ### 3.4 Containment: what remains, what is refused
@@ -600,7 +605,8 @@ functions (that needs superuser).
     human-provisioned) terminates any **runtime-role** backend that holds a `screening_gate_locks` row lock longer than N seconds (N is an
     engineering setting; default proposal 30 s).
   - Each termination is logged and reported as `gate_lock_holder_terminated` (p2).
-  - The watchdog is **activation-blocking in both tiers** (s19). Until it exists, the residual is stated: an admitted runtime caller can hold
+  - The watchdog is **activation-blocking in Tier N**. In Tier S it is required **unless** the owner chooses the operations alternative (an
+    idle-in-transaction reaper, or a written owner acceptance of the residual), OD-G0/s19. Security's position is that it is required in both tiers. Until it exists, the residual is stated: an admitted runtime caller can hold
     a lock row for as long as its connection lives.
 
 | Row key | Replaces | Taken by (mode) |
@@ -1081,6 +1087,12 @@ As v2, plus:
   `GA009 gate_role_separation_violated`. Migrations: `GA095` (down refused), `GA098` (pre-flight, including
   `legacy_pending_enabling_present` as its detail).
 - Reused unchanged: `gate_environment_refused`, `trigger_gate_enable_refused`.
+- **v2.2 additions:**
+  - guard: `gate_authorisation_tier_mismatch` and `gate_tier_s_requires_synthetic` (AT004/LC050 by scope);
+  - executors: `classification_changed_refile` (LC050);
+  - owner side: `GA010 replica_mode_refused` (the replica-mode refusal trigger) and `GA098` details `created_at_ahead_of_clock_present`
+    and `legacy_pending_enabling_present`;
+  - retryable: `40001` is mapped to `gate_retry_later` as well (ledger N-2).
 - **Parity rule (A-19):** every HINT raised anywhere in 0195-0198 is in `aml.RefusalCodes`, in the licensing-change refusal table and in the
   OpenAPI enum. A static test extracts the HINT literals from the migration files.
 
@@ -1164,6 +1176,13 @@ purpose never page. In staging and production:
 
 **Metrics (operations, v2.2):** loop duration; last successful pass; a problem gauge by code; attestation age; authorisation expiry gauge;
 guard refusals by code; `monitor_skipped`; watchdog terminations.
+
+**v2.2 problem additions:**
+- p1 in staging and production: `role_separation_violated`, `chain_entry_missing`, `chain_entry_orphan` (completeness);
+- p2: `role_separation_waived` (S-b), `gate_lock_holder_terminated`, `clock_regression_clamped`, `created_at_ahead_of_clock`;
+- p3: `head_export_unconfigured`.
+
+Development and test stay capped at p3.
 
 **Discriminator:** one open alert per problem code. **Routing:** severity is the only routing key the dispatcher supports today (F20).
 Per-environment behaviour is therefore achieved by the severity mapping above, not by routing. OD-G11 is rewritten accordingly.
@@ -1250,8 +1269,11 @@ evidence.**
 
 | ID | Criterion | Layer | Kills | Non-vacuity |
 |---|---|---|---|---|
-| A-1 | Enabling without C(T,J) is refused on the routed author, the owner setter (owner pool) and a raw owner INSERT, with codes; zero rows written | integration | M01 M02 M08 | the same call succeeds after `AuthoriseGate` |
-| A-2 | Legacy run: tightening and pending-off cancellation accepted (stamp and pointer inherited); another J of T refused; adoption flips the classification; the gate decision table is unchanged | integration | M03 M05 M27 M28 | the fixture has ≥1 legacy run and ≥1 held person |
+| A-1 | Enabling without C(T,J) is refused on the routed author, the owner setter (owner pool) and a raw owner INSERT, with codes. "Zero rows written" is measured as unchanged row counts of the policy table, every evidence table, the chain, `audit` (except the denied-audit row the route writes by design) and alerts | integration | M01 M02 M08 | the same call succeeds after `AuthoriseGate` |
+| A-2a | Legacy run: a tightening continuation is accepted with the pointer inherited | integration | M05 | the fixture has ≥1 legacy run |
+| A-2b | Pending governed gate-off cancelled by a gating row: continuation, stamp inherited, allowed in **every** state | integration | M03 | a pending gate-off exists in force order |
+| A-2c | Another J of the same T is refused `gate_tenant_has_unauthorised_gate` | integration | M28 | the same J of another tenant is allowed |
+| A-2d | Adoption flips the classification; the gate decision table is unchanged | integration | M05 | ≥1 held person before and after |
 | A-3 | No settings: `gate_activation_not_configured` and `gate_authorisation_not_configured` | integration | M06 | succeeds once configured |
 | A-4 | Each owner parameter violated gives its code; validity floor 3600 | integration | M19 M24 | boundary values pass |
 | A-5 | Lapse via the clock seam (explicit `p_now`) plus one end-to-end lapse with a 3600 s authorisation and an owner-forged `valid_until` on a private DB **through the guard**; gate decisions unchanged | unit-SQL + integration | M09 M10 M41 | before lapse: allowed |
@@ -1264,16 +1286,16 @@ evidence.**
 | A-12 | Instance attestation currency through the pure helper (all six bound values, confirmations, primary-only) | unit-SQL | M21 M22 | the live tuple passes |
 | A-13 | Restore (V5a, V5c) gives `identity_mismatch`; unrecorded anchor gives `environment_mismatch` | integration (private DB) | M23 | the source DB classifies `authorised` |
 | A-14 | Adoption digest binding (canonical encoding with pinned GUCs; varied TimeZone/DateStyle in-session gives the same digest); `unexplained` refused | integration | M25 M26 | the correct digest passes |
-| A-15 | Reconcile and monitor return every s11 code from fixtures; per-check isolation (`monitor_check_failed`); `monitor_unavailable` by version | integration | M29 M30 | a clean fixture returns none |
+| A-15 | Reconcile and monitor return every s11 code that is **runnable here**: all except the D1 codes (`ddl_outside_migration`, `ddl_in_declared_window`, `ddl_audit_missing` present-case), which are drill evidence. Also per-check isolation (`monitor_check_failed`) and `monitor_unavailable` by version | integration | M29 M30 | a clean fixture returns none |
 | A-16 | Chain verify (in-DB and the external client-side reference implementation) detects edit, delete, insert, reorder and a forged `prev_hash`; tolerates seq gaps | integration + unit (Go verifier) | M31 M32 M33 M34 | an untampered chain with gaps verifies |
 | A-17 | No activation by migration or start (s7.4) | integration + static + E2E | M35 M36 | the fixture upgrade has N > 0 gating runs |
-| A-18 | Migration matrix (V1-V5, V3b, V7, V8), down refusals, fingerprints by column name | integration (`cmd/migrate`) | M39 | down-then-up equals the first up |
+| A-18 | Migration matrix (V1-V5, V3b, V7, V8), down refusals, fingerprints by column name. (V6 is covered by A-7, V9 by A-8; V12b is a performance record attached to the merge evidence, not pass/fail; V13 is drill evidence and activation-blocking) | integration (`cmd/migrate`) | M39 M59 | down-then-up equals the first up |
 | A-19 | Parity of HINTs, RefusalCodes, licensing-change refusal table and OpenAPI; no jurisdiction literals | static | n/a | the extractor finds ≥ 40 hints |
 | A-20 | Reviews: security (blocking), ledger-finance, qa; full integration suite, hosted CI, Playwright (spec 10 updated) green; the affected-test list (s15.3) all pass with their stated assertions; the trigger-policy writer pin **unchanged** | process | — | — |
 | A-21 | **Gate-off succeeds** through the owner setter **and** `screening_trigger_loosen_apply` under each bad state: frozen, unconfigured, unattested, unexplained, chain broken, tripwire failing, non-READ-COMMITTED; and while `gate:global` and `chain:evidence` are held exclusively by another session | integration | M07 M18 | the same state refuses enabling |
 | A-22 | No runtime-role session can lock any `screening_gate_locks` row (42501), and no advisory key remains in any function body | integration + static | M14 | the owner can lock |
 | A-23 | Every cross-tenant read (guard step 6.6, classify, reconcile, monitor, inventory) raises or reports `_read_inconsistent` when its per-tenant read disagrees (fault injection: an RLS policy mutant) | integration | M20 | the consistent case reports nothing |
-| A-24 | Future-dated enabling refused for every writer; UI and E2E as in s7.6 | integration + vitest + E2E | M04 | a future-dated continuation is accepted |
+| A-24 | Future-dated enabling refused for every writer, **including a raw owner INSERT**; UI and E2E as in s7.6 | integration + vitest + E2E | M04 | a future-dated continuation is accepted |
 | A-25 | A production-configured `platform-api` refuses to start against a non-production anchor; `VerifyRuntimeRoleSeparation` refuses where settings exist | Go integration | M38 | a matching configuration starts |
 
 ### 15.2 Mutation plan (QA H-3)
@@ -1297,8 +1319,9 @@ is not the implementer. Survivors are listed as evidence with a disposition.
 | M10 | max(valid_until) instead of the latest current by seq | A-5 |
 | M11 | worker attestation not bound to the current instance attestation | A-11 |
 | M12 | `NULL`-scope revocation ignored | A-6 |
-| M13 | revocation coverage by `created_at` instead of seq | A-6 (seq/clock fixture) |
-| M14 | `gate:<T>:<J>` shared/exclusive swapped; advisory lock reintroduced | A-7, A-22 |
+| M13 | revocation coverage by `created_at` instead of seq | A-6 with an **owner-forged revocation on a private DB whose seq order differs from its clock order** |
+| M14a | `gate:<T>:<J>` shared/exclusive swapped | A-7 |
+| M14b | an advisory lock reintroduced in a slice function | A-22 |
 | M15 | lock order inverted (`gate:*` before `policy:*`) | A-7 lock-order matrix |
 | M16 | executor does not re-check revocation under the lock | A-7 |
 | M17 | isolation check removed | A-8 |
@@ -1311,10 +1334,10 @@ is not the implementer. Survivors are listed as evidence with a disposition.
 | M24 | requester counted as approver; approvals older than 24 h counted | A-4 |
 | M25 | digest computed from `row::text` / without pinned GUCs | A-14 |
 | M26 | adoption of `unexplained` allowed | A-14 |
-| M27 | skip the freeze check | A-2 (freeze case), A-21 inverse |
+| M27 | skip the freeze check | A-39 (explicit) |
 | M28 | skip the tenant legacy containment | A-2 |
 | M29 | classification precedence swapped (`authorised` before `revoked`) | A-15 (cross-product oracle) |
-| M30 | inventory membership replaced by the `created_at < cutover` test | A-15 (a backdated fixture) |
+| M30 | inventory membership replaced by the `created_at < cutover` test | A-15: a tamper fixture on a private DB inserts, after cut-over with the guard disabled, a gating row with a caller-supplied `created_at` before the cut-over time. It must classify `unexplained`, not legacy |
 | M31 | chain ignores `prev_hash` | A-16 |
 | M32 | row hash omits a column | A-16 |
 | M33 | verify checks only the head | A-16 |
@@ -1322,11 +1345,11 @@ is not the implementer. Survivors are listed as evidence with a disposition.
 | M35 | 0198 seeds a settings row | A-17 |
 | M36 | inventory writable after cut-over | A-17, A-9 |
 | M37 | attestor check does not exclude the owner | A-9 |
-| M38 | role-separation check removed | A-25 |
+| M38 | role-separation check removed | A-25, A-41 (with the OD-M1 owner configuration; otherwise substitute evidence, s15.5) |
 | M39 | down not refused in staging | A-18 |
 | M40 | the gate predicate reads `screening_gate_*` | A-10 |
 | M41 | an authorisation treated as single-use (consumed at enabling) | A-5 (re-enable within validity) |
-| M42 | lapse or revocation writes a policy row / touches `aml_holds` (I2, I3) | A-6, A-9 writer pins |
+| M42 | lapse or revocation writes a policy row or touches `aml_holds` (I2, I3) | A-6 with **row-count and digest snapshots of policy, holds, lifts, payouts and ledger before and after** lapse and revocation (plus the A-9 writer pins) |
 
 ### 15.3 Fixtures (QA H-1, ledger H-1): one sanctioned path, no bypass
 
@@ -1387,15 +1410,75 @@ s4.9 order.
   RDS function privileges (staging probe), real two-Person independence (process audit).
 - The s2 claim "verified by qa and code-reviewer" was replaced by "to be verified".
 
-## 16. What blocks MERGING vs ACTIVATING (v2.1)
+### 15.6 v2.2 additions (criteria, mutants, tests)
 
-**MERGING:** A-1 to A-25 (written or reviewed by qa first; mutation run by a non-implementer); OD-M1 (role provisioning in CI and scratch
-DBs, human-applied); OD-M2; the runbook section; the init-app-role changes; parity. Merge does not need D1, D3b, D4, D5, delivery or any
+| ID | Criterion | Layer | Kills | Non-vacuity |
+|---|---|---|---|---|
+| A-26 | Lock-key CHECK accepts every key form of s4.9 (seeds and per-(T,J)) and rejects malformed keys | static + SQL | M76 | a malformed key is rejected |
+| A-27 | **No lock before admission**: catalogue parse (callees expanded transitively); behavioural: a session sets `app.platform_admin_principal_id`, calls each assert and preview, and holds the transaction; a concurrent governed gate-off completes without waiting | catalogue + integration | M64 | the same assert run as the executor does lock |
+| A-28 | **Guard-level wiring** (QA High): for each bound value (`system_identifier`, `timeline_id` from both sources, `postmaster_start_time`, `database_oid`, `environment`, `cutover_nonce`, `tier`), an owner-forged attestation or authorisation on a private DB with that **single value** changed is refused **by the real guard** with the matching HINT | integration (private DB, owner) | M21 M22 M23 M45 M65 | the unforged row passes |
+| A-29 | **Break-glass**: owner exclusion; non-member refusal; idempotency by `incident_reference`; `breakglass_noop_refused`; freeze cap and drill cap; governed two-Person lift; membership reporting; no break-glass function writes the policy table, settings or authorisations (writer pin) | integration (OD-M1 roles) | M68-M75 | a member login succeeds |
+| A-30 | Tenant isolation of reads: every function in the s5.2 read pin gives AT002 for a foreign tenant; `p_tenant` NULL is platform-only | integration | M77 | own tenant reads succeed |
+| A-31 | Two-stream routing (a policy row lands only in its pair stream, under the pair lock); a **differential test of Go vs SQL hashes** over random rows; a rollback-gap fixture verifies | integration + Go unit | M51 M31-M34 | equal hashes on the sample |
+| A-32 | 0198 behaviour: `GA098` abort on a non-vacuity mismatch; `relforcerowsecurity` restored afterwards; a concurrent writer blocked during the lock; OD-G13 both branches; a **Go oracle for `legacy_enabling_policy_id`** over randomised legacy histories | integration (`cmd/migrate`) | M56 M57 M58 M54 | a clean history passes |
+| A-33 | Ordering vs wall time: clamp cases (clock behind; equal; ahead), `inserted_at` forced, the clamp trace (chain mark + `clock_regression_clamped`), `created_at_ahead_of_clock`, and the REPEATABLE READ gate-off race giving `40001` (ledger N-2) | integration | M52 M66 | a normal-clock insert is not marked |
+| A-34 | `gate_enabling_policy_id` cases: caller-supplied refused; enabling = own id; continuation = F's enabling; legacy continuation = the inventory enabling row | integration | M53 M54 | — |
+| A-35 | Severity mapping on scratch DBs anchored `staging` and `production` (and p3-capping in development and test) | integration | M78 | the development DB shows p3 |
+| A-36 | Stale version probe: features stay off until the refresh after `up` | Go integration | M79 | after refresh, features are on |
+| A-37 | Property test: random sequences of enabling, continuation, gate-off, pending-off and cancel vs a Go oracle of s3.1 | Go + integration | M03 M05 M53 | the oracle and the database agree on a known sequence |
+| A-38 | 0197 pins: md5-identical predicate bodies 0194 to 0198; screening-policy functions change only in the lock line; decision tables (incl. returned jsonb) identical; helper mutants M60-M62 killed by the **unchanged** existing suites | catalogue + integration | M60 M61 M62 | pre-0197 tables are non-empty |
+| A-39 | Freeze: new enabling refused `gate_activation_frozen`; a gate-off while frozen succeeds | integration | M27 | after expiry, enabling succeeds |
+| A-40 | Replica-mode refusal: an owner session with a superuser-granted test `SET session_replication_role` (only if the human approves a CI superuser step) is refused `GA010`; otherwise substitute: catalogue mode pin + drill | integration or substitute | M67 | — |
+| A-41 | Extended role-separation checks (API login attributes, ADMIN OPTION, attestor is not the API login), with the OD-M1 configurations | integration (or substitute) | M38 | the separated configuration passes |
+| A-42 | Tier binding: changing settings S→N makes S authorisations non-current (`gate_authorisation_tier_mismatch`); Tier S needs synthetic worker and heartbeat (`gate_tier_s_requires_synthetic`) | integration | M65 M80 | same-tier passes |
+| A-43 | The watchdog terminates a runtime backend holding a lock row longer than N s | drill (role `pg_signal_backend`) | — | the holder is visible beforehand |
+| A-44 | **Every alert problem code has an existing runbook anchor** (merge criterion, operations N10) | static | — | the extractor finds every code |
+| A-45 | Revocation idempotency with `NULL` `authorisation_id` (NULLS NOT DISTINCT) | integration | M81 | distinct incidents are both recorded |
+| A-46 | The `screening_gate_enable_preview` pin (AT002, platform-only, bounded, no lock) | integration | M64 M77 | own-tenant preview works |
+
+**Additional mutants (QA):**
+- **M43** guard skips 6.6 (instance integrity); **M44** skips 6.10 (screening-policy changed); **M45** nonce or payload binding ignored;
+- **M46** persons count without `app.tenant_id = T` (fails open); **M47** cap skipped; **M48** `valid_from` lower boundary off by one;
+- **M49** instance confirmation by the same login accepted; **M50** heartbeat synthetic-flag mismatch ignored; **M51** policy row routed to
+  the evidence stream, or pair lock skipped in the chain append; **M52** `GREATEST` dropped;
+- **M53** caller-supplied `gate_enabling_policy_id` accepted; **M54** legacy pointer wrong; **M55** gate-off taking `gate:*` or `chain:evidence` (A-21);
+- **M56** 0198 lock dropped; **M57** 0198 unfiltered-count non-vacuity removed; **M58** OD-G13 refusal removed;
+- **M59a/b/c** down refusal on evidence row / stamped row / post-cut-over gating row removed;
+- **M60-M62** pair-helper mutants (s7.1); **M63** SQLSTATE by scope swapped (behavioural: governed path must return 409 with the code, not 500);
+- **M64** lock before admission in an assert; **M65** tier or binding equality ignored; **M66** validity by `created_at` instead of `inserted_at`;
+- **M67** replica-refusal allows any backend; **M68-M75** break-glass (owner exclusion, membership, idempotency, no-op, freeze cap,
+  single-person lift, a break-glass writer of the policy table, membership reporting);
+- **M76** lock-key CHECK; **M77** read without tenant filter; **M78** severity mapping ignores the anchor; **M79** probe never refreshes;
+- **M80** Tier S synthetic check removed; **M81** idempotency key without `NULLS NOT DISTINCT`.
+
+Kill mapping: M43 → A-28/A-15 integrity fixture; M44 → A-42/A-5 variant; M46 → A-23; M47 → A-4; M48 → A-5; M49 → A-12; M50 → A-11;
+M55 → A-21; M63 → A-21 (governed path).
+
+**Test logistics (QA):**
+- `AuthoriseGate` retries on `gate_retry_later` (bounded).
+- Choke points to change first: `trigWorld.setTrigger`, `triggerInput`, `gate()` and `amlfix`. Extra files: `screening_lic26` (9 calls), d1r2, d1r3, d1r4.
+- The lock-order parse expands callees transitively and treats the gate-off path as a prefix of the order.
+- Interleaving polls are bounded by 4 s, under the 5 s `lock_timeout`.
+- The `schemaSnapshot` extension covers: new tables and columns by name and type, trigger modes, function md5s, ACLs, the lock-key CHECK text.
+- The E2E harness gets an attestor login (OD-M1).
+
+**Cannot be tested here (substitute evidence), v2.2 additions:**
+- role-separation branches needing `rds_superuser` (substitute: catalogue unit tests over fabricated `pg_roles` rows through a pure helper);
+- primary-only attestation (substitute: the helper takes `pg_is_in_recovery()` as an argument);
+- the BYPASSRLS verifier (substitute: a drill);
+- a real restart, PITR or blue/green (substitute: the drill and helper tests);
+- the `idle_in_transaction` bound and the watchdog (drill);
+- alert delivery and the D3b store (operations evidence).
+
+## 16. What blocks MERGING vs ACTIVATING (v2.2)
+
+**MERGING:** A-1 to A-46 except the drill-only A-43 (written or reviewed by qa first; mutation run by a non-implementer); OD-M1 (the full role list of s12.1,
+human-applied in CI, the E2E cluster and scratch DBs); OD-M2; the runbook section; the init-app-role changes; parity. Merge does not need D1, D3b, D4, D5, delivery or any
 OD-G decision. Without them the mechanism is inert and fails closed.
 
 **ACTIVATING:** OD-G0 (tier) and the controls its tier requires (s19); OD-G1, G3, G4, G6, G7, G8, G10, G11, G13, G14; settings
 configured through the governed kind; roles provisioned; legacy gates of the tenant resolved; the capacity slice done and its figures
-accepted; Back Office forms; `idle_in_transaction_session_timeout` on the runtime role. **Production additionally:** OD-G2, G9, G12,
+accepted; Back Office forms; the **watchdog** (or the owner-accepted Tier S alternative, s19); A-43 and the V13 drills; the Tier-agnostic non-negotiables (s19). **Production additionally:** OD-G2, G9, G12,
 a real provider (PROVIDER DEPENDENT), the sanctions false-positive policy, and a migration lifting I8.
 
 ## 17. Choices reviewers should attack (v2.1)
@@ -1496,40 +1579,138 @@ LF-L-5, QA-H-1, OPS-H2, OPS-M5 (reasons above).
    both should confirm.
 4. QA H-1 ("use ENABLE ALWAYS" in the trapdoors) is superseded by the DB-H5 resolution; QA should confirm.
 
-## 19. Tiered activation proposal (OWNER DECISION OD-G0; not decided here)
+### 18.2 Review dispositions, round 2 (confirmation reviews of v2.1)
 
-**Tier S:** synthetic persons only, the MOCK provider, development or staging anchor.
+| Finding | Status | Where fixed / reason |
+|---|---|---|
+| SEC-N1 (High) proof-less asserts and classifier branches take locks | A | s4.9 admission rule (no lock before actor proof or LC040; filing-time validation without locks; execution re-validates under the locks; `classification_changed_refile`); watchdog; I2, I13, P18, T16 reworded; A-21 case (gate-off while a session sits in an assert, via A-27); A-22 scoped to this slice |
+| SEC-N1-PLATFORM advisory-lock squatting across 21 platform migrations (e.g. `0181:373`, `:406`) | O (new item) | recorded as a separate platform review item for the orchestrator; out of this slice's scope |
+| SEC-N2 clamp pushes `created_at` ahead; validity at `created_at` | A | s3.1: `inserted_at` (wall time) for every validity test; clamp trace; `created_at_ahead_of_clock`; 0198 pre-flight; A-33 |
+| SEC-N3 replica mode | A | s5.5 `screening_replica_mode_refuse` (ALWAYS, backend_type allow-list; Q11 open); anchor UPDATE/DELETE deny split and ALWAYS; completeness check in the external verifier; manifest pins `pg_db_role_setting` and an empty `pg_parameter_acl`; Tier N pgaudit `misc_set` + `log_connections`; startup-options gap recorded; A-40 |
+| SEC-N4 role separation extended; s5.5 vs s19 contradiction | A | s5.5 API-login attributes, ADMIN OPTION, attestor is not the API login; `VerifyRuntimeRoleSeparation` at startup for staging and production plus every monitor pass; the contradiction removed: the setting `role_separation` (`enforced` / `waived_tier_s`), with the exact Tier S acceptance in s19 |
+| SEC-N5 tier binding | A | `tier` on authorisations; currency requires equality; Tier S synthetic check (database part) vs process part stated; S→N needs the verifier countersignature (self-asserted to the database); `screening_gate_tier_n_prerequisites()` reports only what the database can observe and labels the rest self-asserted (s19) |
+| SEC-N6 revocation UNIQUE with NULL; dead column; preview binding; monitor single-flight; sequences | A | NULLS NOT DISTINCT (PG15+; RDS must be ≥ 15); `lifted_by_request_id` removed; preview AT002, platform-only, bounded; skipped pass skips the export (`monitor_skipped`); closing REVOKE covers sequences |
+| SEC-N7 read-filter pin; atomic swap of `0189:67` and `0190:689` | A | s5.2; s4.9 |
+| LF-N-1 0197 cannot prove tighten-only unchanged | A | s7.1 (i)-(iv); helper mutants M60-M62 killed by unchanged suites; A-38 |
+| LF-N-2 REPEATABLE READ gate-off after a clock step-back | A | `last_created_at` on the pair lock row under FOR UPDATE (`40001` retryable); A-33 |
+| LF-N-3 I13 wording; `gate_retry_later` runbook | A | s2; s4.9; s7.7 |
+| LF-N-4 | A | as SEC-N6 |
+| LF non-negotiables | A | s19 "Tier-agnostic non-negotiables" |
+| QA guard-level wiring (High) | A | A-28 |
+| QA break-glass criterion and mutants | A | A-29, M68-M75 |
+| QA OD-M1 full role list; E2E attestor | A | s12.1 OD-M1 |
+| QA missing mutants; weak mappings (M13, M14 split, M27, M30, M38, M42); equivalent mutant at step 8 | A | s15.2 rows rewritten; s15.6 M43-M81; s4.1 step 8 note |
+| QA added tests (tenant isolation, streams + differential hashes + gaps, 0198 behaviour + Go oracle, clamp cases, pointer cases, severity mapping, stale probe, property test, A-1 zero-rows definition, A-2 split, A-15 runnable subset, A-24 raw owner INSERT) | A | s15.1 rows, s15.6 |
+| QA logistics (AuthoriseGate retry, choke points and extra files, transitive lock parse, polling bound, schemaSnapshot content, preview pin) | A | s15.6 |
+| QA N-12 inconsistencies (E-5/E-8/E-9/E-17; s11 "state 6"; A-18 mapping) | A | s13 note; s11 fixed; A-18 |
+| QA untestable additions | A | s15.6 |
+| OPS Tier S minimum (metrics, daily reviewer, manual head anchor, one-time D1/D3b/D4 exercise, reaper or acceptance, activation order, OD-G10 after-hours) | A + O | s19 table; s7.7; s11 metrics; OD-G10 |
+| OPS not-fixed items (acknowledged-until, `head_export_unconfigured`, capacity remediation, one ordered checklist, concrete drill deliverables) | A | s7.7; V13 |
+| OPS-N2 idle timeout is USERSET; doc inconsistency | A | s4.9 (not a bound; watchdog); s16 consistent |
+| OPS-N3 / DB-N4 0198 lock | A | s7.1: ACCESS EXCLUSIVE as the first statement, monitors and worker paused, stated read stall |
+| OPS-N4 / DB-N3 txid column | A | s7.1: ADD COLUMN NULL, then SET DEFAULT |
+| OPS-N9 holder identity needs `pg_read_all_stats` | A (DEFERRED AWS) | s4.9; Q13 |
+| OPS-N10 runbook anchors exist; per-instance R1 probe | A | A-44; s7.1 |
+| OPS-N11 txid after a logical restore; drill cadence; shared environment anchoring | A | s7.1; s4.10; s7.7 |
+| DB-N1 lock-key CHECK rejects the seeds (defect) | A | s4.0 fixed pattern; A-26 |
+| DB-N2 non-vacuity source of truth; O(tenants); exact GUC restore | A | s3.3 paragraph; s4.1 step 12 |
+| DB-N5 0197 decision tables | A | s7.1 (iv) |
+| DB-N6 0197 down conditions; wording | A | s7.2 |
+| DB-N7 legacy-pending pre-flight in R1/CI; governed neutralisation | A | s7.1 R1 |
+| DB-N8 (a) classifier branches take `gate:global` exclusive **at filing** before the request row lock | **R** | conflicts with SEC-N1 (High): no lock before admission. Filing-time branches now take **no** lock, so the ordering concern disappears; the executors take `gate:global` after the request row lock (s4.9) |
+| DB-N8 (b) adopt takes `policy:<T>:<J>` before `gate:global`; fairness; swap timing; revoke branch shape-only; read-back assertion; timeline from WAL file name too; COLLATE "C" + type tag; VOLATILE chain triggers; chain indexes; probe refresh interval | A | s4.9 table and notes; s6.2; s4.1 step 12; Q12; s4.0 |
+| DB-L7 any platform_admin can file a revoke | A (accepted risk) | s6.2 |
+| DB wording on the publisher's deny triggers | A | s5.5 |
+
+**Rejected:** DB-N8 (a), for the reason above. **Owner items:** SEC-N1-PLATFORM; the watchdog alternative in Tier S; OD-G14 / S-b.
+
+**New disagreements between reviewers (round 2):**
+1. **DB-N8 (a) vs SEC-N1:** whether filing-time branches should take `gate:global`. Resolved in favour of SEC-N1 (no lock before admission);
+   DB architecture should confirm that execution-time re-validation is sufficient.
+2. **Watchdog in Tier S:** security makes it activation-blocking in both tiers; operations accepts a reaper or a written owner acceptance.
+   Owner decision (s19).
+3. **Role separation in Tier S:** security wants it enforced; operations accepts the S-b waiver. Owner decision OD-G14, now internally
+   consistent through the setting.
+
+## 19. Tiered activation proposal (OWNER DECISION OD-G0; not decided here; v2.2)
+
+**Tier S:** synthetic persons only, the MOCK provider, a development or staging anchor.
 **Tier N:** any non-synthetic person data, any real provider, or production.
 
-| Control | Operations position (Tier S) | Security position (Tier S) | Tier N (both) |
+**Tier-agnostic non-negotiables** (ledger; required in both tiers, not up for the tier decision):
+- I1 to I3 and I13, with the predicate md5 pin (A-38);
+- no gate-off refused for a bad state (A-21);
+- screening-only holds park (never `DenyForCompliance`; lic18 behaviour unchanged);
+- the payments sweeper monitor runs independently of the worker;
+- worker attestation plus heartbeat before new enabling;
+- OD-G10 decided before activation and before any gate-off outside development;
+- in Tier S, synthetic-only **enforced** as far as the database can (worker and heartbeat `synthetic = true`, MOCK provider; s4.1 step 9b).
+  That no real person data is present is a **process control**, checked by the named daily reviewer.
+
+| Control | Operations (Tier S minimum) | Security (Tier S) | Tier N |
 |---|---|---|---|
-| In-database controls (guard, governed kinds, attestations, lock rows, classification, in-DB monitor) | required | required | required |
-| Owner decisions OD-G1, G3, G4, G6-G8, G10, G13 + settings | required | required | required (+ G2, G9, G12 for production) |
-| Role provisioning (attestor, break-glass) | required | required | required |
-| Runbook + break-glass drill | required | required | required |
-| **Separate staging owner role** (not the RDS master; OD-G14) | not required (synthetic data) | **required**: activation in staging is real activation of the control path | required |
-| **Alert delivery** (ALERT-DELIVERY-1 closed) | not required (dashboard review) | **required** for p1 | required |
-| D1 DDL event trigger | not required (`ddl_audit_missing` p3) | **required** (p1) | required, p1 |
-| D3b external verifier + external head store | not required | **required** (independent verification) | required |
-| D4 signed manifest compare | not required | required (by the same external job) | required |
-| D5 pgaudit + log shipping | not required | desirable | required |
-| `idle_in_transaction_session_timeout` on runtime | required | required | required |
+| In-database controls; roles provisioned with **named logins**; **two-person attestation**; runbook with the activation order | required | required | required |
+| Break-glass drill on a throwaway cluster with real roles | required | required | required |
+| Metrics (s11) and a **named daily reviewer** during activation | required | required | required |
+| **Manual chain-head anchor** in the change ticket at every authorisation, attestation and revocation | required | acceptable only alongside D3b | replaced by D3b |
+| One-time exercise of D1, D3b and D4 on the evidence environment | required | not enough: continuous | continuous |
+| Watchdog | **reaper, or a written owner acceptance** | **required** | required |
+| Role separation (OD-G14) | S-b waiver acceptable | S-a enforced | enforced (no waiver possible: CHECK) |
+| Alert delivery (ALERT-DELIVERY-1) | dashboard plus the daily reviewer | required for p1 | required |
+| D1 / D3b / D4 continuous | not required | required | required |
+| D5 pgaudit (`misc_set`, `ddl`, `role`) + `log_connections` | not required | desirable | required |
 | Phase 2 worker split | not required | not required | required before production |
 
-The architect does not decide the tier. Points both positions share: a Tier S activation must never process non-synthetic persons, and
-moving a database from S to N is a new settings version (`tier = 'N'`, a widening that needs two Persons). Its executor refuses until
-the Tier N controls report present (D1 event trigger present, external head fresh, manifest compare fresh, all through a
-`screening_gate_tier_n_prerequisites()` check with codes `tier_n_prerequisite_missing:<control>`).
+**What Tier S accepts under S-b (role separation waived), stated exactly.** The staging owner is the RDS master. It can grant itself attestor
+or break-glass membership. It can create logins. It can disable or replace any guard and forge consistent evidence. Only the
+manual chain-head anchors in tickets and the daily reviewer would notice. The exposure is limited to synthetic persons and the MOCK
+provider. **An S-b database can never move to Tier N**: the S→N settings change refuses unless `role_separation = 'enforced'`.
 
-## 20. Top remaining design risks (v2.1)
+**S→N transition.** A two-Person settings change (`tier = 'N'`), which:
+- invalidates every Tier S authorisation (tier equality, s4.1 step 9);
+- requires `s_to_n_verifier_record_sha256`, the digest of a **signed freshness record produced by the external verifier** (head verified,
+  completeness verified, manifest compare clean, timestamp). The database cannot verify that signature; the **approvers** verify it out of
+  band. To the database it is self-asserted.
 
-1. **Alert delivery is OPEN.** Every detection control ends in an alert that may reach nobody until ALERT-DELIVERY-1 is closed.
-2. **Owner-forged consistent evidence** is invisible in the database (T21). It is caught only if D1, D3b and D5 actually run, and in Tier S they may not (s19).
-3. **R-5:** the API process holds the actor-proof keys, so the two-Person rule does not resist API compromise.
-4. **Lock-row holding** by an open runtime transaction depends on an operations timeout that the runtime role cannot be trusted to keep.
-5. **Superuser replica-mode bypass** of ORIGIN insert guards (the price of logical-replication compatibility).
-6. **Attestation burden** may cause blind re-attestation (R-3). The two-person confirmation helps only if the second attestor really checks.
-7. **The 0197 rewrite** of the 0189/0190/0191 functions (the lock swap) touches reviewed money-adjacent code. The fingerprint-diff pin is the only guard against accidental drift.
-8. **Feasibility unknowns:** `pg_control_*` and event triggers on RDS; blue/green trigger modes (Q8); the version probe in the pipeline (Q10).
-9. **"Revoked before execution"** keeps one clock comparison.
-10. **Test-suite migration scale** (about 60 call sites, 4 trapdoors, 21 kinds pin). A careless migration could weaken an assertion. A-20's "same assertion text" rule is the guard against that.
+`screening_gate_tier_n_prerequisites()` reports only what the database can observe: the event trigger is present and enabled,
+`pg_parameter_acl` is empty, role separation is enforced, the watchdog role exists, and the external head export is recent (from the
+monitor's own export timestamps, which are themselves runtime-influenced). It labels every external control
+`self_asserted:<control>`. It is **partial** and never claims to know the external controls (operations N1).
+
+## 20. Top remaining design risks (v2.2)
+
+1. **Alert delivery is OPEN.** Tier S under the operations position relies on a human daily reviewer.
+2. **Owner-forged consistent evidence** stays invisible in the database. In Tier S with S-b, only ticket anchors and the reviewer remain.
+3. **R-5:** the API process holds the actor-proof keys.
+4. **The watchdog** is a new privileged component (`pg_signal_backend`). It is a target, and it does not exist yet. Without it, an admitted
+   holder can stall a governed gate-off for as long as its connection lives.
+5. **The platform-wide advisory-lock squatting class** outside this slice (SEC-N1-PLATFORM) remains.
+6. **The 0197 rewrite** of reviewed functions: the pins (md5, decision tables, helper mutants on unchanged suites) are the only guard.
+7. **0198 takes ACCESS EXCLUSIVE** on a table read on the withdrawal path. The stall is bounded but real; deploy discipline matters.
+8. **Feasibility unknowns:** backend_type strings (Q11), timeline reads (Q12), `pg_read_all_stats` on RDS (Q13), event triggers and
+   `pg_control_*` on RDS, NULLS NOT DISTINCT on the RDS version.
+9. **Test migration scale:** about 60 call sites, 4 trapdoors, plus 21 new criteria. There is a risk of weakened assertions; the guard is A-20's same-text rule.
+10. **"Revoked before execution"** keeps one clock comparison.
+
+## 21. What the implementation estimate looks like (relative size; no dates)
+
+Size units: S = 1, M = 2, L = 3, XL = 5 (relative effort, including tests and review rounds).
+
+| Work package | Size | Notes |
+|---|---|---|
+| WP0 human role provisioning (OD-M1) and the watchdog role | S (human) | blocks merge-ready testing; not agent work |
+| WP1 R1 application (codes, OpenAPI, probes, retry mapping, `VerifyRuntimeRoleSeparation`, legacy pre-flight check) | M | |
+| WP2 migration 0195 (evidence tables, lock table, chain, encoders, attest and break-glass functions, replica refusal, txid) | L | the largest SQL surface |
+| WP3 migration 0196 (five kinds, asserts, executors) + Go kind registration | L | reuses the 0190/0191 recipe |
+| WP4 migration 0197 (lock swap + pair helper) with pins and decision tables | M | small diff, high risk; ledger review heavy |
+| WP5 migration 0198 (guard, cut-over, inventory, trigger modes, classify, reconcile, monitor summary) | L | the deploy plan included |
+| WP6 R2 (monitor loop, metrics, read and reconcile routes, Back Office badge and forms, UI change for immediate enabling) | L | |
+| WP7 fixture migration (`AuthoriseGate`, about 60 call sites, trapdoors, pins 16→21 etc.) | L | mechanical but assertion-sensitive |
+| WP8 new tests A-1 to A-46 + mutation harness + M01-M81 run by a non-implementer | XL | the dominant cost |
+| WP9 external verifier job (client-side hashes, completeness, manifest compare, head store, dead-man's switch) | M | needed for Tier N, or as security's Tier S position |
+| WP10 watchdog job | S | |
+| WP11 runbook, drills (V13), break-glass drill, evidence templates | M | |
+| WP12 independent reviews (security, ledger-finance, DB, QA, operations) over WP2-WP8 | L | |
+
+Total is about 30 units. WP8 alone is about one sixth. WP2, WP3, WP5 and WP7 are on the critical path for merge. WP9 to WP11 are activation-blocking only.
+The capacity slice is **not** included (separate).
