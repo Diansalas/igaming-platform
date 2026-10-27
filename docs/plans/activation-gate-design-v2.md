@@ -129,7 +129,7 @@ DB L2) replaces the duplicated "latest / in force" queries in the author, the lo
 
 ### 3.2 Cut-over inventory (no data rewrite)
 
-Migration 0198 (the guard migration, s7.1) takes `LOCK TABLE aml_screening_trigger_policies IN SHARE ROW EXCLUSIVE MODE` under
+Migration 0198 (the guard migration, s7.1) takes `LOCK TABLE aml_screening_trigger_policies IN ACCESS EXCLUSIVE MODE` (v2.2; was SHARE ROW EXCLUSIVE, see s7.1) as its first statement, under
 `SET LOCAL lock_timeout = '5s'` (DB M9), then writes:
 
 ```sql
@@ -157,7 +157,7 @@ CREATE TABLE screening_gate_legacy_inventory (            -- platform-level (no 
   pattern). For non-vacuity, the migration also takes an **unfiltered** count inside the same transaction: `ALTER TABLE ... NO FORCE
   ROW LEVEL SECURITY`, then `count(*)`, then `FORCE` again. This follows the precedent of the `0191` down migration, and the owner does
   not bypass a FORCE policy otherwise. The per-tenant total must equal it; otherwise the migration aborts with `GA098` (I14). The
-  temporary NO FORCE happens under the SHARE ROW EXCLUSIVE lock, inside the migration transaction, and is recorded by D1 as migration DDL.
+  temporary NO FORCE happens under the ACCESS EXCLUSIVE lock, inside the migration transaction, and is recorded by D1 as migration DDL.
 - **Legacy pending gating rows** (security M2): pre-cut-over gating rows with `effective_from > now()` would take effect later
   with no authorisation. The pre-flight lists them (ids). By default 0198 **refuses to apply** while any exist (`GA098`,
   `legacy_pending_enabling_present`), unless the owner decision OD-G13 chose "apply and classify". With that option they are
