@@ -25,6 +25,7 @@ type LatencyProvider struct {
 	fails atomic.Int64
 	hangs atomic.Int64
 	lat   []time.Duration // observed per-call durations (capped)
+	cache map[string]aml.ScreeningResult
 }
 
 // NewLatencyProvider returns a provider with a seeded RNG (reproducible latency sequence per call order).
@@ -107,7 +108,19 @@ func (p *LatencyProvider) Screen(ctx context.Context, in aml.ScreeningRequest) (
 		p.fails.Add(1)
 		return aml.ScreeningResult{}, aml.ErrProviderUnavailable
 	}
-	return aml.ScreeningResult{Outcome: aml.OutcomeClear, ProviderReference: "lt-" + in.IdempotencyKey, ScreenedAt: time.Now().UTC()}, nil
+	res := aml.ScreeningResult{Outcome: aml.OutcomeClear, ProviderReference: "lt-" + in.IdempotencyKey, ScreenedAt: time.Now().UTC()}
+	if c.Cache {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.cache == nil {
+			p.cache = map[string]aml.ScreeningResult{}
+		}
+		if prev, ok := p.cache[in.IdempotencyKey]; ok {
+			return prev, nil // replay returns the first answer, as an idempotent vendor does
+		}
+		p.cache[in.IdempotencyKey] = res
+	}
+	return res, nil
 }
 
 // Latencies returns a copy of the observed per-call durations.

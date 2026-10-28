@@ -54,7 +54,7 @@ def fn_table(d, scs):
         print(f"| {k} | " + " | ".join(cells) + " |")
 
 def growth_table(d, scs):
-    keys = ["since_at_oldest(all_versions_later)", "since_at_mid", "since_at_recent_3d", "covers", "gate_denies_clear", "gate_denies_stale", "gate_denies_none", "enqueue_due_100", "gate_overdue_500"]
+    keys = ["since_at_oldest(all_versions_later)", "since_at_mid", "since_at_recent_3d", "since_prod_shape_after=mid_history_version", "since_prod_shape_after=latest_version", "covers", "gate_denies_clear", "gate_denies_stale", "gate_denies_none", "enqueue_due_100", "gate_overdue_500"]
     data = {sc: runs(d, "growth", sc) for sc in scs}
     print("| statement (median ms; min-max across runs) | " + " | ".join(scs) + " |")
     print("|---|" + "---|" * len(scs))

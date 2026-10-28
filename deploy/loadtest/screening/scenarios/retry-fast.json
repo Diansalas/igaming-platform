@@ -1,0 +1,17 @@
+{
+ "name": "retry-fast",
+ "version": 1,
+ "seed": 42,
+ "description": "(ops M2) as retry-storm but backoff base 3 s (instead of 30 s) so failed_terminal is reached; outage 60 s; window 300 s",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 50,
+  "fail_persist": 0.3
+ },
+ "window_secs": 300,
+ "extra": {
+  "outage_secs": 60,
+  "backoff_base_secs": 3
+ },
+ "seed_scenario": "retry-300"
+}

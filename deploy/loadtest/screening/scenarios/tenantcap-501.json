@@ -1,0 +1,26 @@
+{
+ "name": "tenantcap-501",
+ "version": 1,
+ "seed": 42,
+ "description": "(review H1) 501 tenants x 3 stale persons: is tenant #501 (by id) ever served? (TenantCap 500)",
+ "tenant_groups": [
+  {
+   "count": 501,
+   "persons": 3
+  }
+ ],
+ "mix": {
+  "clear": 0,
+  "stale": 1.0,
+  "legacy": 0,
+  "needs_officer": 0,
+  "held": 0,
+  "pending": 0
+ },
+ "policy_versions": 1,
+ "passes": 2,
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 0
+ }
+}

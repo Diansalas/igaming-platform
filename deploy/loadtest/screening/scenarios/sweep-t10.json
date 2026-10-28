@@ -1,0 +1,11 @@
+{
+ "name": "sweep-t10",
+ "version": 1,
+ "seed": 42,
+ "description": "(review H2) real payments.Sweeper.RunPass (screening-parked read + claim query per tenant, nil orchestrator) on fleet t10",
+ "passes": 3,
+ "extra": {
+  "pass_cap_secs": 600
+ },
+ "seed_scenario": "pass-t10"
+}

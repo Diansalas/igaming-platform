@@ -1,0 +1,28 @@
+{
+ "name": "replay-4",
+ "version": 1,
+ "seed": 42,
+ "description": "(ledger M4) 4 stale persons; idempotent-replay provider; lost finish; reclaim after a 125 s lease",
+ "tenant_groups": [
+  {
+   "count": 1,
+   "persons": 4
+  }
+ ],
+ "mix": {
+  "clear": 0,
+  "stale": 1.0,
+  "legacy": 0,
+  "needs_officer": 0,
+  "held": 0,
+  "pending": 0
+ },
+ "policy_versions": 1,
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 0
+ },
+ "extra": {
+  "lease_secs": 125
+ }
+}

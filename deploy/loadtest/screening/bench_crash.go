@@ -114,11 +114,15 @@ func benchCrash(ctx context.Context, dbName string, sc *Scenario, run int) (any,
 	time.Sleep(1500 * time.Millisecond) // inside the provider call (injected latency is longer)
 	tKill := time.Now()
 	pid := w1.Process.Pid
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil { // by pid; no pkill
+	sig, signame := syscall.SIGKILL, "SIGKILL"
+	if v, ok := sc.Extra["kill_signal"].(string); ok && v == "TERM" {
+		sig, signame = syscall.SIGTERM, "SIGTERM"
+	}
+	if err := syscall.Kill(pid, sig); err != nil { // by pid; no pkill
 		return nil, err
 	}
 	w1.Wait()
-	res["killed_pid_signal"] = "SIGKILL"
+	res["killed_pid_signal"] = signame
 	res["held_at_kill"] = len(held)
 	res["lease_remaining_at_kill_s"] = time.Until(held[0].LeaseUntil).Seconds() + time.Since(tKill).Seconds()
 	st1, _ := statusCounts(ctx, oc, tid)

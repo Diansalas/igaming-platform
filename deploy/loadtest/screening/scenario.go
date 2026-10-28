@@ -32,6 +32,7 @@ type ProviderCfg struct {
 	FailRate    float64 `json:"fail_rate"`    // fraction returning an error (unavailable)
 	HangRate    float64 `json:"hang_rate"`    // fraction that never answers (waits for the call deadline)
 	FailPersist float64 `json:"fail_persist"` // fraction of SUBJECTS that fail on every attempt (hash of the subject ref)
+	Cache       bool    `json:"cache"`        // idempotent replay: the same idempotency key returns the FIRST answer (including its ScreenedAt)
 }
 
 // Scenario is a versioned scenario definition (a file under scenarios/).

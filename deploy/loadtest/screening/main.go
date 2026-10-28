@@ -71,6 +71,12 @@ func main() {
 		res, err = benchCrash(ctx, *db, sc, *run)
 	case "worker":
 		err = workerMain(ctx, *db, sc)
+	case "sweep":
+		res, err = benchSweep(ctx, *db, sc, *run)
+	case "tenantcap":
+		res, err = benchTenantCap(ctx, *db, sc, *run)
+	case "replay":
+		res, err = benchReplay(ctx, *db, sc, *run)
 	case "race":
 		res, err = benchRace(ctx, *db, sc, *run)
 	default:

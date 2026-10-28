@@ -2,7 +2,7 @@
 -- + capa_since_v2). Compares, for every (tenant, jurisdiction) whose latest trigger policy lists 'scheduled', the FULL candidate relation
 -- (person_id, covered, last_any, before the LIMIT) and times both. Works on any capa_* database: ./run.sh explain fn-10k experiments/06_enqueue_candidates.sql
 \set ON_ERROR_STOP on
-\i 03_gate_set.sql
+\if :{?have03}\else\i 03_gate_set.sql\set have03 1\endif
 CREATE FUNCTION capa_enq_old(p_tenant uuid, p_jur uuid) RETURNS TABLE (person_id uuid, last_any timestamptz, covered boolean) LANGUAGE plpgsql STABLE AS $$
 DECLARE v_sp record; v_first timestamptz;
 BEGIN

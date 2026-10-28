@@ -1,0 +1,16 @@
+{
+ "name": "run-t10-w2",
+ "version": 1,
+ "seed": 42,
+ "description": "(review H3) 2 worker loops (each its own 10-connection pool, as 2 API replicas) on 10 tenants, 100 ms provider",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 100
+ },
+ "passes": 3,
+ "workers": 2,
+ "extra": {
+  "pass_cap_secs": 150
+ },
+ "seed_scenario": "pass-t10"
+}

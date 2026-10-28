@@ -214,6 +214,28 @@ func benchRunPass(ctx context.Context, dbName string, sc *Scenario, run int) (an
 	}
 	wg.Wait()
 	elapsed := time.Since(start)
+	// invariants over the requests CREATED during the run (review H3): duplicates per person and bucket, attempts vs provider calls
+	inv := map[string]any{}
+	{
+		var newReq, sumAtt, dupPB, multiAtt, doneN, termN int64
+		for _, t := range tenants {
+			if err := setTenant(ctx, oc, t.ID); err != nil {
+				break
+			}
+			var a, b, c, d, e, f int64
+			oc.QueryRow(ctx, `SELECT count(*), COALESCE(sum(attempts),0), count(*) FILTER (WHERE attempts>1), count(*) FILTER (WHERE status='done'), count(*) FILTER (WHERE status='failed_terminal') FROM aml_screening_requests WHERE tenant_id=$1 AND created_at > $2`, t.ID, start).Scan(&a, &b, &d, &e, &f)
+			oc.QueryRow(ctx, `SELECT count(*) FROM (SELECT person_id, split_part(idempotency_key,':',3) b FROM aml_screening_requests WHERE tenant_id=$1 AND created_at > $2 AND idempotency_key ~ '^sched:[0-9a-f-]{36}:' GROUP BY 1,2 HAVING count(*) > 1) q`, t.ID, start).Scan(&c)
+			newReq += a
+			sumAtt += b
+			multiAtt += d
+			doneN += e
+			termN += f
+			dupPB += c
+		}
+		calls, _, _ := prov.Counts()
+		inv = map[string]any{"requests_created_in_run": newReq, "sum_attempts_of_those": sumAtt, "provider_calls": calls, "provider_calls_le_sum_attempts": calls <= sumAtt,
+			"persons_with_more_than_one_scheduled_request_per_bucket(want 0)": dupPB, "requests_with_attempts_gt_1": multiAtt, "done": doneN, "failed_terminal": termN}
+	}
 	poolStats := stopPool()
 	probe, perr := pr.Stop(ctx)
 	if perr != nil {
@@ -268,7 +290,7 @@ func benchRunPass(ctx context.Context, dbName string, sc *Scenario, run int) (an
 		"pass_duration_complete": summarize(durs), "claims_total": claimed, "done": done, "retried": retried, "terminal": term, "lost": lost,
 		"errors": errs, "enqueued": enq, "trapped_sum": trapped, "parked_sum": parked,
 		"rate_window_s": slot, "claims_per_hour_per_tenant_measured": perHourPerTenant, "claims_per_hour_per_tenant_upper_bound_config": 3600.0 / 10 * float64(claimBatch(w)),
-		"provider_latency": summarize(prov.Latencies()), "passes": all, "pool": poolStats, "probe": probe, "background": bgst,
+		"invariants": inv, "provider_latency": summarize(prov.Latencies()), "passes": all, "pool": poolStats, "probe": probe, "background": bgst,
 		"provider_calls_fails_hangs": func() []int64 { a, b, c := prov.Counts(); return []int64{a, b, c} }(),
 	}, nil
 }

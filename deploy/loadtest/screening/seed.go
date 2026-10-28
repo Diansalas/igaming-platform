@@ -76,6 +76,14 @@ INSERT INTO aml_screening_requests (id,tenant_id,person_id,licensing_jurisdictio
          md5('{{.Seed}}:sp:{{.Tn}}:'||r.jx||':'||r.k)::uuid, {{.Lists}}, {{.I}}, now()-make_interval(secs=>r.age+3),
          md5('{{.Seed}}:sp:{{.Tn}}:'||r.jx||':'||r.k)::uuid
     FROM seed_r r JOIN capa_jur j ON j.jx = r.jx;
+-- review M2 (optional): extra OLD done requests per clear/stale person (extra_history per person), older than the re-screen interval
+INSERT INTO aml_screening_requests (id,tenant_id,person_id,licensing_jurisdiction_id,trigger,idempotency_key,status,attempts,next_attempt_at,
+       outcome,provider_id,provider_reference,subject_ref,screened_at,completed_at,created_at,updated_at,screened_policy_id,screened_lists,screened_interval_seconds,claimed_at,claim_policy_id)
+  SELECT md5('{{.Seed}}:xh:{{.Tn}}:'||r.g||':'||h)::uuid,'{{.TID}}',r.pid,j.id,'scheduled','sched:'||r.g||':hist'||h||':{{.Seed}}','done',1,now(),
+         'clear','mock-screening','mock-h'||h,md5(r.pid::text)||md5(h::text), now()-make_interval(secs=>({{.I}}*(1.3+0.3*h))+2), now()-make_interval(secs=>({{.I}}*(1.3+0.3*h))),
+         now()-make_interval(secs=>({{.I}}*(1.3+0.3*h))+10), now()-make_interval(secs=>({{.I}}*(1.3+0.3*h))),
+         md5('{{.Seed}}:sp:{{.Tn}}:'||r.jx||':0')::uuid, {{.Lists}}, {{.I}}, now()-make_interval(secs=>({{.I}}*(1.3+0.3*h))+3), md5('{{.Seed}}:sp:{{.Tn}}:'||r.jx||':0')::uuid
+    FROM seed_r r JOIN capa_jur j ON j.jx = r.jx CROSS JOIN generate_series(1,{{.XH}}) h WHERE r.bucket IN ('clear','stale');
 -- pending (due) requests
 INSERT INTO aml_screening_requests (id,tenant_id,person_id,licensing_jurisdiction_id,trigger,idempotency_key,status,attempts,next_attempt_at)
   SELECT md5('{{.Seed}}:pq:{{.Tn}}:'||s.g)::uuid,'{{.TID}}',s.pid,j.id,'scheduled','sched:'||s.g||':pend:'||'{{.Seed}}','pending',0, now()-interval '1 minute'
@@ -105,6 +113,7 @@ type tenantSeedArgs struct {
 	DF                     float64
 	TID, BID               string
 	Lists                  string
+	XH                     int
 }
 
 // openOwner connects as the migration-owner role to the private database.
@@ -186,7 +195,7 @@ func seedDB(ctx context.Context, db string, sc *Scenario) (map[string]any, error
 			tid, _ := md5uuid(ctx, c, fmt.Sprintf("%d:t:%d", sc.Seed, tn))
 			bid, _ := md5uuid(ctx, c, fmt.Sprintf("%d:bd:%d", sc.Seed, tn))
 			a := tenantSeedArgs{Seed: sc.Seed, Tn: int64(tn), J: int64(sc.Jurisdictions), P: int64(g.Persons), V: int64(sc.PolicyVersions), TV: int64(sc.TriggerVersions),
-				I: sc.IntervalSeconds, SpanSecs: span, Alert: sc.GateAlertAfterSeconds, DF: sc.DecisionFraction, TID: tid, BID: bid, Lists: lists,
+				I: sc.IntervalSeconds, SpanSecs: span, Alert: sc.GateAlertAfterSeconds, DF: sc.DecisionFraction, TID: tid, BID: bid, Lists: lists, XH: intExtra(sc, "extra_history", 0),
 				C1: cum("clear"), C2: cum("clear", "stale"), C3: cum("clear", "stale", "legacy"), C4: cum("clear", "stale", "legacy", "needs_officer"),
 				C5: cum("clear", "stale", "legacy", "needs_officer", "held"), C6: cum("clear", "stale", "legacy", "needs_officer", "held", "pending")}
 			var buf bytes.Buffer

@@ -1,0 +1,17 @@
+{
+ "name": "retry-fast-long",
+ "version": 1,
+ "seed": 42,
+ "description": "(ops M2) retry-fast with a 600 s window so the always-failing subjects can reach failed_terminal",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 50,
+  "fail_persist": 0.3
+ },
+ "window_secs": 600,
+ "extra": {
+  "outage_secs": 60,
+  "backoff_base_secs": 3
+ },
+ "seed_scenario": "retry-300"
+}

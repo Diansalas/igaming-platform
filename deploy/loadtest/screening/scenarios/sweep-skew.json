@@ -1,0 +1,11 @@
+{
+ "name": "sweep-skew",
+ "version": 1,
+ "seed": 42,
+ "description": "(review H2) real payments.Sweeper.RunPass (screening-parked read + claim query per tenant, nil orchestrator) on fleet skew",
+ "passes": 2,
+ "extra": {
+  "pass_cap_secs": 600
+ },
+ "seed_scenario": "pass-skew"
+}

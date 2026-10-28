@@ -1,0 +1,11 @@
+{
+ "name": "sweep-p10k",
+ "version": 1,
+ "seed": 42,
+ "description": "(review H2) sweeper pass on one 10k-person tenant",
+ "passes": 3,
+ "seed_scenario": "fn-10k-backlog",
+ "extra": {
+  "pass_cap_secs": 600
+ }
+}

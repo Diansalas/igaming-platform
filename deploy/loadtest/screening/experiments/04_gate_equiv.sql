@@ -6,7 +6,7 @@
 -- needs_officer matches incl. confirmed/sanctions, auto-reviewed re-flags, pending, failed_terminal), 0-3 results (clear with/without provenance,
 -- errors, matches with holds, half of them lifted), officer resolutions of open matches under the request's idempotency key.
 \set ON_ERROR_STOP on
-\i 03_gate_set.sql
+\if :{?have03}\else\i 03_gate_set.sql\set have03 1\endif
 \if :{?seed}\else\set seed 0.2718\endif
 SELECT setseed(:seed);
 ALTER TABLE jurisdictions NO FORCE ROW LEVEL SECURITY; ALTER TABLE tenants NO FORCE ROW LEVEL SECURITY; ALTER TABLE brands NO FORCE ROW LEVEL SECURITY;
@@ -17,7 +17,7 @@ ALTER TABLE aml_screening_policies DISABLE TRIGGER USER; ALTER TABLE aml_screeni
 ALTER TABLE aml_screening_results DISABLE TRIGGER USER; ALTER TABLE aml_holds DISABLE TRIGGER USER; ALTER TABLE aml_hold_lifts DISABLE TRIGGER USER;
 ALTER TABLE tenants DISABLE TRIGGER USER; ALTER TABLE brands DISABLE TRIGGER USER; ALTER TABLE player_accounts DISABLE TRIGGER USER;
 
-CREATE TEMP TABLE eq_t AS SELECT md5('eqt'||g)::uuid AS tid, md5('eqb'||g)::uuid AS bid, g FROM generate_series(1,3) g;
+CREATE TEMP TABLE eq_t AS SELECT md5('eqt'||g)::uuid AS tid, md5('eqb'||g)::uuid AS bid, g FROM generate_series(1,4) g;
 CREATE TEMP TABLE eq_j AS SELECT md5('eqj'||g)::uuid AS jid, g FROM generate_series(1,3) g;
 INSERT INTO jurisdictions (id, code, name) SELECT jid, 'EQG-'||g, 'equiv' FROM eq_j;
 INSERT INTO tenants (id,name,slug,licensing_model,status) SELECT tid,'eq','eqg-'||g,'under_platform_licence','active' FROM eq_t;
@@ -27,18 +27,30 @@ INSERT INTO aml_screening_trigger_policies (id,tenant_id,licensing_jurisdiction_
 SELECT md5('eqtp'||t.tid||j.jid||k)::uuid, t.tid, j.jid, ARRAY['scheduled'], gate, CASE WHEN gate THEN 3600 END,
        ca + (random()*10 - 5) * interval '1 day', 'EQ','eq',md5('s')::uuid,md5('p')::uuid,'platform_acting', ca
   FROM eq_t t CROSS JOIN eq_j j CROSS JOIN LATERAL generate_series(0, floor(random()*4)::int) k
-  CROSS JOIN LATERAL (SELECT now() - (180 - 40*k) * interval '1 day' AS ca, random() < 0.6 AS gate) r;
+  CROSS JOIN LATERAL (SELECT now() - (180 - 40*k) * interval '1 day' AS ca, random() < 0.6 AS gate) r WHERE t.g < 4;
+-- tenant 4 (backfill grace): every jurisdiction gates since 5 days ago
+INSERT INTO aml_screening_trigger_policies (id,tenant_id,licensing_jurisdiction_id,events,gate_withdrawal,gate_alert_after_seconds,effective_from,legal_review_reference,reason_code,created_by,created_by_person_id,created_by_scope,created_at)
+SELECT md5('eqtp4'||t.tid||j.jid)::uuid, t.tid, j.jid, ARRAY['scheduled'], true, 3600, now() - interval '5 days', 'EQ','eq',md5('s')::uuid,md5('p')::uuid,'platform_acting', now() - interval '5 days' FROM eq_t t CROSS JOIN eq_j j WHERE t.g = 4;
 -- screening policy versions (jurisdiction 1 of each tenant always has at least one)
 INSERT INTO aml_screening_policies (id,tenant_id,licensing_jurisdiction_id,lists,rescreen_interval_seconds,backfill_grace_seconds,effective_from,legal_review_reference,reason_code,created_by,created_by_person_id,created_by_scope,created_at)
 SELECT md5('eqsp'||t.tid||j.jid||k)::uuid, t.tid, j.jid, string_to_array((ARRAY['sanctions','pep','sanctions,pep','sanctions,pep','sanctions,pep'])[1+floor(random()*5)::int], ','),
        (20+floor(random()*80)::int)*86400::bigint, floor(random()*30)::bigint*86400, ca + (random()*6 - 3) * interval '1 day','EQ','eq',md5('s')::uuid,md5('p')::uuid,'platform_acting', ca
   FROM eq_t t CROSS JOIN eq_j j CROSS JOIN LATERAL generate_series(1, CASE WHEN j.g = 1 THEN 1 + floor(random()*6)::int ELSE floor(random()*6)::int END) k
   CROSS JOIN LATERAL (SELECT now() - (190 - 30*k) * interval '1 day' + random()*5 * interval '1 day' AS ca) r;
+-- versions that were NEVER in force (a later-created version is effective earlier than they are), created_at ties, future-effective versions
+INSERT INTO aml_screening_policies (id,tenant_id,licensing_jurisdiction_id,lists,rescreen_interval_seconds,backfill_grace_seconds,effective_from,legal_review_reference,reason_code,created_by,created_by_person_id,created_by_scope,created_at)
+SELECT md5('eqsp2'||t.tid||j.jid||k)::uuid, t.tid, j.jid,
+       string_to_array((ARRAY['sanctions','pep','sanctions,pep','sanctions,pep'])[1+floor(random()*4)::int], ','),
+       (20+floor(random()*80)::int)*86400::bigint, floor(random()*30)::bigint*86400,
+       date_trunc('second', now() - (50 - 5*(k/2)) * interval '1 day') + CASE WHEN k % 2 = 0 THEN interval '12 days' ELSE interval '0' END,  -- even k: effective 12 days AFTER creation; odd k (created at the SAME second): effective at creation
+       'EQ','eq',md5('s')::uuid,md5('p')::uuid,'platform_acting', date_trunc('second', now() - (50 - 5*(k/2)) * interval '1 day')
+  FROM eq_t t CROSS JOIN eq_j j CROSS JOIN generate_series(0,7) k;
+UPDATE aml_screening_policies SET backfill_grace_seconds = 30*86400 WHERE tenant_id = (SELECT tid FROM eq_t WHERE g = 4);
 -- persons and accounts
 CREATE TEMP TABLE eq_p AS SELECT t.tid, t.bid, md5('eqp'||t.g||'-'||i)::uuid AS pid, md5('eqa'||t.g||'-'||i)::uuid AS aid, i,
-       now() - (random()*200) * interval '1 day' - interval '1 hour' AS reg FROM eq_t t CROSS JOIN generate_series(1,400) i;
+       now() - (random()*200) * interval '1 day' - interval '1 hour' AS reg FROM eq_t t CROSS JOIN generate_series(1,430) i;
 INSERT INTO persons (id) SELECT pid FROM eq_p;
-INSERT INTO player_accounts (id,tenant_id,brand_id,person_id,email,password_hash,status,created_at,updated_at) SELECT aid,tid,bid,pid,'e'||i||'-'||tid||'@eq.invalid','!x','active',reg,reg FROM eq_p;
+INSERT INTO player_accounts (id,tenant_id,brand_id,person_id,email,password_hash,status,created_at,updated_at) SELECT aid,tid,bid,pid,'e'||i||'-'||tid||'@eq.invalid','!x','active',reg,reg FROM eq_p WHERE i <= 400;
 INSERT INTO player_accounts (id,tenant_id,brand_id,person_id,email,password_hash,status,created_at,updated_at)
 SELECT md5('eqa2'||pid)::uuid,tid,bid,pid,'e2-'||i||'-'||tid||'@eq.invalid','!x','active',reg + random()*30*interval '1 day',reg FROM eq_p WHERE i % 10 = 0;
 -- a helper: random policy id / lists for a tenant
@@ -102,6 +114,16 @@ INSERT INTO aml_screening_results (id,tenant_id,owner_scope,person_id,idempotenc
 SELECT md5('eqres'||r.id)::uuid,r.tenant_id,'platform',r.person_id,r.idempotency_key,'manual','mock-screening',md5(r.id::text)||md5('res'),ARRAY['sanctions','pep'],'clear',r.completed_at,'none',
        md5('p'||r.id)||md5('q'||r.id),md5('s')::uuid,md5('p')::uuid,'platform_acting', LEAST(now() - interval '1 minute', r.completed_at + random()*20*interval '1 day')
   FROM aml_screening_requests r WHERE r.status = 'needs_officer' AND r.reviewed_from_request_id IS NULL AND random() < 0.35 AND r.idempotency_key !~ '^eqv:';
+-- sanctions-class resolution BY A MATCH: a potential_match under the request's key that placed a sanctions-class hold resolves a sanctions-class request
+CREATE TEMP TABLE eq_sr AS SELECT r.id, r.tenant_id, r.person_id, r.idempotency_key, r.completed_at, md5('eqsh'||r.id)::uuid AS hid FROM aml_screening_requests r
+ WHERE r.status = 'needs_officer' AND r.reviewed_from_request_id IS NULL AND ('sanctions' = ANY(r.match_lists) OR r.outcome = 'confirmed') AND r.idempotency_key !~ '^eqv:' AND random() < 0.4
+   AND NOT EXISTS (SELECT 1 FROM aml_screening_results x WHERE x.tenant_id = r.tenant_id AND x.idempotency_key = r.idempotency_key);
+INSERT INTO aml_holds (id,tenant_id,owner_scope,person_id,hold_scope,reason_class,reason_code,placed_by,placed_by_person_id,placed_by_scope,placed_at)
+SELECT hid,tenant_id,'platform',person_id,'all_value_movement','sanctions_potential','eq',md5('s')::uuid,md5('p')::uuid,'platform_acting',completed_at + interval '1 hour' FROM eq_sr;
+INSERT INTO aml_screening_results (id,tenant_id,owner_scope,person_id,idempotency_key,trigger,provider_id,subject_ref,lists,outcome,match_lists,screened_at,decision,hold_id,hold_reason_class,payload_hash,recorded_by,recorded_by_person_id,recorded_by_scope,recorded_at)
+SELECT md5('eqsx'||id)::uuid,tenant_id,'platform',person_id,idempotency_key,'manual','mock-screening',md5(id::text)||md5('sx'),ARRAY['sanctions','pep'],'potential_match',ARRAY['sanctions'],completed_at,'hold_all_value_movement',hid,'sanctions_potential',md5('sx1'||id)||md5('sx2'||id),md5('s')::uuid,md5('p')::uuid,'platform_acting', LEAST(now() - interval '1 minute', completed_at + interval '2 hours') FROM eq_sr;
+INSERT INTO aml_hold_lifts (id,hold_id,tenant_id,owner_scope,lifted_by,lifted_by_person_id,lifted_by_scope,lifted_at,reason_code)
+SELECT md5('eqsl'||id)::uuid,hid,tenant_id,'platform',md5('s')::uuid,md5('p')::uuid,'platform_acting', LEAST(now() - interval '1 minute', completed_at + interval '3 hours'),'eq' FROM eq_sr WHERE random() < 0.5;
 ALTER TABLE aml_screening_policies ENABLE TRIGGER USER; ALTER TABLE aml_screening_trigger_policies ENABLE TRIGGER USER; ALTER TABLE aml_screening_requests ENABLE TRIGGER USER;
 ALTER TABLE aml_screening_results ENABLE TRIGGER USER; ALTER TABLE aml_holds ENABLE TRIGGER USER; ALTER TABLE aml_hold_lifts ENABLE TRIGGER USER;
 ALTER TABLE tenants ENABLE TRIGGER USER; ALTER TABLE brands ENABLE TRIGGER USER; ALTER TABLE player_accounts ENABLE TRIGGER USER;

@@ -1,0 +1,16 @@
+{
+ "name": "crash-term",
+ "version": 1,
+ "seed": 42,
+ "description": "(ops M4) rolling restart: SIGTERM with 4 claims in flight (8 s provider latency), restart after 5 s",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 8000
+ },
+ "extra": {
+  "restart_delay_secs": 5,
+  "observe_secs": 150,
+  "kill_signal": "TERM"
+ },
+ "seed_scenario": "crash-500"
+}

@@ -1,0 +1,26 @@
+{
+ "name": "fn-10k-hist",
+ "version": 1,
+ "seed": 42,
+ "description": "(review M2) 10k persons, steady mix, 4 extra old done requests per clear/stale person (richer history)",
+ "tenant_groups": [
+  {
+   "count": 1,
+   "persons": 10000
+  }
+ ],
+ "mix": {
+  "clear": 0.94,
+  "stale": 0.03,
+  "legacy": 0.005,
+  "needs_officer": 0.005,
+  "held": 0.005,
+  "pending": 0.0
+ },
+ "policy_versions": 3,
+ "reps": 3,
+ "extra": {
+  "cycle_budget_secs": 120,
+  "extra_history": 4
+ }
+}

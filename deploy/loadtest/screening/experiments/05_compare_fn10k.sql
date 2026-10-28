@@ -1,7 +1,7 @@
 -- Full-tenant comparison on a seeded scenario DB (./run.sh explain fn-10k experiments/05_compare_fn10k.sql): the denied SET and the time of
 -- (a) the production per-person plpgsql path, (b) the set-based candidate, for the first 500 / 5000 / all persons in person_id order.
 \set ON_ERROR_STOP on
-\i 03_gate_set.sql
+\if :{?have03}\else\i 03_gate_set.sql\set have03 1\endif
 SELECT id AS tid FROM tenants WHERE status = 'active' ORDER BY created_at, slug LIMIT 1 \gset
 SELECT set_config('app.tenant_id', :'tid', false) \gset
 \timing on

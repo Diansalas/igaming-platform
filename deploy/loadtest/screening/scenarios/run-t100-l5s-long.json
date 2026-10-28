@@ -1,0 +1,15 @@
+{
+ "name": "run-t100-l5s-long",
+ "version": 1,
+ "seed": 42,
+ "description": "(ops C1) one pass of 100 tenants with a 5 s provider, cap 800 s: tail finishes after the 10-minute heartbeat bound",
+ "provider": {
+  "dist": "fixed",
+  "latency_ms": 5000
+ },
+ "passes": 1,
+ "extra": {
+  "pass_cap_secs": 800
+ },
+ "seed_scenario": "pass-t100"
+}
