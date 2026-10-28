@@ -1,0 +1,16 @@
+Output format is unaligned.
+
+3
+--- heartbeat aged to 11 minutes:
+UPDATE 1
+t
+--- finish(clear) with the stale heartbeat (expect ERROR ... AT001 provider is not the one a running screening worker reported):
+psql:11_heartbeat_expiry.sql:18: ERROR:  aml: the provider is not the one a running screening worker reported
+CONTEXT:  PL/pgSQL function aml_screening_assert_worker_provider(text) line 5 at RAISE
+SQL statement "SELECT public.aml_screening_assert_worker_provider(p_provider_id)"
+PL/pgSQL function aml_screening_request_finish(uuid,uuid,uuid,text,text[],text,text,text,text,timestamp with time zone,integer,text,uuid) line 34 at PERFORM
+--- finish(retry) with the stale heartbeat (a retry never makes a person pass; expect applied=t, status pending):
+t|pending|f
+--- fresh heartbeat, re-claim after making it due, finish(clear) (expect applied=t, status done):
+
+t|done|f
